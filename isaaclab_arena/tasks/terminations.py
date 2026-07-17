@@ -74,8 +74,6 @@ def check_success(
     return results.sum(dim=0) >= k
 
 
-# NOTE(alexmillane, 2025.09.15): The velocity threshold is set high because some stationary
-# seem to generate a "small" velocity.
 def deformable_centroid_in_proximity(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg,
@@ -110,10 +108,14 @@ def deformable_centroid_height_below_minimum(
     asset_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
     """Terminate when a deformable object's centroid falls below ``minimum_height``."""
+    # Height is checked in world frame (no env-origin subtraction) because envs are tiled in XY with a
+    # zero z-origin; keep this consistent if environments ever gain a nonzero z-offset.
     deformable_object = env.scene[asset_cfg.name]
     return deformable_object.data.root_pos_w.torch[:, 2] < minimum_height
 
 
+# NOTE(alexmillane, 2025.09.15): The velocity threshold is set high because some stationary
+# seem to generate a "small" velocity.
 def lift_object_il_success(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),

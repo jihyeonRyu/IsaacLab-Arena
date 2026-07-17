@@ -57,6 +57,9 @@ class ArenaPhysicsCfg(PresetCfg):
     )
     newton_mjwarp_vbd = DeformableNewtonCfg(
         solver_cfg=CoupledMJWarpVBDSolverCfg(
+            # Rigid solver settings favor contact-rich manipulation: a high contact budget
+            # (njmax/nconmax), elliptic friction cone with large impratio for stable grasps, and many
+            # solver/CCD iterations so gripper-object contacts resolve without penetration.
             rigid_solver_cfg=MJWarpSolverCfg(
                 solver="newton",
                 integrator="implicitfast",
@@ -70,6 +73,8 @@ class ArenaPhysicsCfg(PresetCfg):
                 ls_parallel=False,
                 ccd_iterations=15000,
             ),
+            # Self-contact and periodic collision re-detection are off: the objects are convex and
+            # small, so the extra cost buys nothing.
             soft_solver_cfg=VBDSolverCfg(
                 iterations=10,
                 integrate_with_external_rigid_solver=True,
@@ -78,12 +83,16 @@ class ArenaPhysicsCfg(PresetCfg):
             ),
             coupling_mode="two_way",
         ),
+        # Contact stiffness (ke), damping (kd), and friction (mu) for soft contacts (deformable) and
+        # rigid shape contacts. shape_material_kd damps rigid-body contact: without it, a rigid object
+        # resting on the table bounces on its penetration and the high friction turns that bounce into
+        # lateral skitter, so it walks off the table; kd=100 lets rigid objects settle and stay put.
         model_cfg=NewtonModelCfg(
             soft_contact_ke=1.0e4,
             soft_contact_kd=1.0e-5,
             soft_contact_mu=5.0,
             shape_material_ke=4.0e4,
-            shape_material_kd=1.0e-5,
+            shape_material_kd=100.0,
             shape_material_mu=5.0,
         ),
         num_substeps=10,

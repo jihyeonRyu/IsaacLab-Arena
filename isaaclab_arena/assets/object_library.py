@@ -385,11 +385,18 @@ _PROCEDURAL_DEFORMABLE_SPHERE_RADIUS = 0.06
 
 
 def _lame_parameters(youngs_modulus: float, poissons_ratio: float) -> tuple[float, float]:
+    """Convert (Young's modulus, Poisson's ratio) to Lamé (mu, lambda).
+
+    Newton's material takes Lamé parameters directly, whereas PhysX takes Young's/Poisson's; deriving
+    both from the same pair keeps the two backends materially equivalent.
+    """
     k_mu = youngs_modulus / (2.0 * (1.0 + poissons_ratio))
     k_lambda = youngs_modulus * poissons_ratio / ((1.0 + poissons_ratio) * (1.0 - 2.0 * poissons_ratio))
     return k_mu, k_lambda
 
 
+# Young's modulus sets stiffness: the sphere is soft enough to visibly squash under the gripper; the
+# cube below is stiffer (2e5) so it holds its edges. Poisson's ratio 0.4 is near-incompressible rubber.
 _PROCEDURAL_DEFORMABLE_SPHERE_YOUNGS_MODULUS = 1.0e5
 _PROCEDURAL_DEFORMABLE_SPHERE_POISSONS_RATIO = 0.4
 _PROCEDURAL_DEFORMABLE_SPHERE_K_MU, _PROCEDURAL_DEFORMABLE_SPHERE_K_LAMBDA = _lame_parameters(
@@ -415,6 +422,8 @@ _PROCEDURAL_DEFORMABLE_SPHERE_NEWTON_SPAWN_CFG = UsdFileCfg(
     deformable_props=NewtonDeformableBodyPropertiesCfg(),
     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.25, 0.2)),
     physics_material=NewtonDeformableBodyMaterialCfg(
+        # density ~ lightweight foam; particle_radius is the VBD collision radius, kept below the tet
+        # edge length so neighboring particles collide against the gripper rather than tunnel through.
         density=300.0,
         particle_radius=0.008,
         k_mu=_PROCEDURAL_DEFORMABLE_SPHERE_K_MU,
