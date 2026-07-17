@@ -16,6 +16,7 @@ from isaaclab.managers import EventTermCfg
 from isaaclab.managers.recorder_manager import RecorderManagerBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab_tasks.utils import parse_env_cfg
+from isaaclab_tasks.utils.hydra import resolve_presets
 from isaaclab_teleop import IsaacTeleopCfg
 
 from isaaclab_arena.assets.registries import DeviceRegistry
@@ -101,6 +102,58 @@ class ArenaEnvBuilder:
             placer_params=placer_params,
             scene_assets=self.arena_env.scene.assets.values(),
         )
+
+    def _scene_has_deformable_objects(self) -> bool:
+        """Return True when the composed Arena scene contains a deformable object.
+
+        Detection is done on the Arena asset objects (by ``object_type``) rather than on the resolved
+        scene configclass, so it also works before ``resolve_presets`` runs (on the no-preset path the
+        scene field is still an unresolved ``PresetCfg``, not a ``DeformableObjectCfg``).
+        """
+        from isaaclab_arena.assets.object_type import ObjectType
+
+        return any(
+            getattr(asset, "object_type", None) == ObjectType.DEFORMABLE
+            for asset in self.arena_env.scene.assets.values()
+        )
+
+    def _configure_physics_for_scene(self, env_cfg: Any, presets: str | None) -> Any:
+        """Select the physics backend preset and set ``replicate_physics`` for the composed scene.
+
+        Single source of truth for backend/replication. Deformable objects are supported on either
+        backend: Newton VBD (``--presets newton_mjwarp_vbd``, ``replicate_physics=True``) or PhysX
+        (``replicate_physics=False``, since PhysX cannot replicate deformables). With no preset a
+        deformable scene falls back to the PhysX spawn (the object ``PresetCfg``'s ``default``, which
+        ``parse_env_cfg`` resolves), so the environment still boots out of the box. The rigid-only
+        ``newton`` preset cannot simulate deformables and is rejected. Returns the (possibly
+        preset-resolved) ``env_cfg``.
+        """
+        from isaaclab_arena.environments.isaaclab_arena_manager_based_env_cfg import ArenaPhysicsCfg
+
+        has_deformable = self._scene_has_deformable_objects()
+
+        if presets is None:
+            # No preset -> PhysX (sim.physics stays None). PhysX cannot replicate deformables.
+            if has_deformable:
+                env_cfg.scene.replicate_physics = False
+            return env_cfg
+        if has_deformable and presets == "newton":
+            raise NotImplementedError(
+                "Arena deformable scenes need a Newton deformable solver preset. Use --presets newton_mjwarp_vbd "
+                "instead of --presets newton, which selects the rigid-body MJWarp preset."
+            )
+
+        env_cfg = resolve_presets(env_cfg, selected=(presets,))
+        env_cfg.sim.physics = getattr(ArenaPhysicsCfg(), presets)
+
+        # replicate_physics shares a single physics representation across environments. Newton needs it
+        # (without it, init is very slow for many envs) and supports it for deformables; PhysX cannot
+        # replicate deformables, so force it off for PhysX deformable scenes.
+        if presets.startswith("newton"):
+            env_cfg.scene.replicate_physics = True
+        elif has_deformable:
+            env_cfg.scene.replicate_physics = False
+        return env_cfg
 
     def get_all_variations(self) -> dict[str, list[VariationBase]]:
         """Return ``{asset_name: [variation, ...]}`` for every variation host in the env.
@@ -379,17 +432,7 @@ class ArenaEnvBuilder:
         env_cfg.seed = self.cfg.seed
 
         # Apply the requested physics backend after the callback so it remains the final authority.
-        presets = self.cfg.presets
-        if presets is not None:
-            from isaaclab_arena.environments.isaaclab_arena_manager_based_env_cfg import ArenaPhysicsCfg
-
-            env_cfg.sim.physics = getattr(ArenaPhysicsCfg(), presets)
-
-            # Set replicate_physics for shared physics representations.
-            # For Newton, without this flag, the simulation initialization
-            # takes a very long time for large number of parallel environments.
-            if presets == "newton":
-                env_cfg.scene.replicate_physics = True
+        env_cfg = self._configure_physics_for_scene(env_cfg, self.cfg.presets)
 
         env_kwargs: dict[str, Any] = {"variation_recorder": variation_recorder}
         return env_cfg, env_kwargs

@@ -5,6 +5,7 @@
 
 
 from abc import ABC
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import isaaclab.sim as sim_utils
@@ -13,13 +14,18 @@ if TYPE_CHECKING:
     from isaaclab_arena.assets.hdr_image import HDRImage
 
 from isaaclab.assets import RigidObjectCfg
-from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
+from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab_newton.sim.schemas import NewtonDeformableBodyPropertiesCfg
+from isaaclab_newton.sim.spawners.materials import NewtonDeformableBodyMaterialCfg
+from isaaclab_physx.sim.schemas import PhysxDeformableBodyPropertiesCfg
+from isaaclab_physx.sim.spawners.materials import PhysxDeformableBodyMaterialCfg
 
 from isaaclab_arena.affordances.openable import Openable
 from isaaclab_arena.affordances.placeable import Placeable
 from isaaclab_arena.affordances.pressable import Pressable
 from isaaclab_arena.affordances.turnable import Turnable
+from isaaclab_arena.assets.deformable_object import DeformableObject
 from isaaclab_arena.assets.lightwheel_lazy import LightwheelLazyPath
 from isaaclab_arena.assets.nucleus import ARENA_NUCLEUS_DIR
 from isaaclab_arena.assets.object import Object
@@ -30,7 +36,14 @@ from isaaclab_arena.assets.object_utils import (
     RIGID_BODY_PROPS_MEDIUM_PRECISION,
 )
 from isaaclab_arena.assets.register import register_asset
+from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
 from isaaclab_arena.utils.pose import Pose
+
+# Pre-tetrahedralized deformable meshes live next to this module (see usd/generate_deformable_tet_meshes.py).
+# Spawning a deformable from these UsdGeom.TetMesh assets avoids the runtime pytetwild/pyvista dependency.
+_LOCAL_ASSET_DIR = Path(__file__).resolve().parent / "usd"
+_DEFORMABLE_SPHERE_TET_USD = str(_LOCAL_ASSET_DIR / "procedural_deformable_sphere_tet.usda")
+_DEFORMABLE_CUBE_TET_USD = str(_LOCAL_ASSET_DIR / "procedural_deformable_cube_tet.usda")
 
 
 class LibraryObject(Object):
@@ -365,6 +378,136 @@ class Sphere(LibraryObject):
             initial_pose=initial_pose,
             scale=scale,
             spawner_cfg=spawner_cfg,
+        )
+
+
+_PROCEDURAL_DEFORMABLE_SPHERE_RADIUS = 0.06
+
+
+def _lame_parameters(youngs_modulus: float, poissons_ratio: float) -> tuple[float, float]:
+    k_mu = youngs_modulus / (2.0 * (1.0 + poissons_ratio))
+    k_lambda = youngs_modulus * poissons_ratio / ((1.0 + poissons_ratio) * (1.0 - 2.0 * poissons_ratio))
+    return k_mu, k_lambda
+
+
+_PROCEDURAL_DEFORMABLE_SPHERE_YOUNGS_MODULUS = 1.0e5
+_PROCEDURAL_DEFORMABLE_SPHERE_POISSONS_RATIO = 0.4
+_PROCEDURAL_DEFORMABLE_SPHERE_K_MU, _PROCEDURAL_DEFORMABLE_SPHERE_K_LAMBDA = _lame_parameters(
+    _PROCEDURAL_DEFORMABLE_SPHERE_YOUNGS_MODULUS,
+    _PROCEDURAL_DEFORMABLE_SPHERE_POISSONS_RATIO,
+)
+_PROCEDURAL_DEFORMABLE_SPHERE_PHYSX_SPAWN_CFG = UsdFileCfg(
+    usd_path=_DEFORMABLE_SPHERE_TET_USD,
+    deformable_props=PhysxDeformableBodyPropertiesCfg(
+        rest_offset=0.0,
+        contact_offset=0.002,
+        solver_position_iteration_count=16,
+        linear_damping=0.01,
+    ),
+    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.25, 0.2)),
+    physics_material=PhysxDeformableBodyMaterialCfg(
+        poissons_ratio=_PROCEDURAL_DEFORMABLE_SPHERE_POISSONS_RATIO,
+        youngs_modulus=_PROCEDURAL_DEFORMABLE_SPHERE_YOUNGS_MODULUS,
+    ),
+)
+_PROCEDURAL_DEFORMABLE_SPHERE_NEWTON_SPAWN_CFG = UsdFileCfg(
+    usd_path=_DEFORMABLE_SPHERE_TET_USD,
+    deformable_props=NewtonDeformableBodyPropertiesCfg(),
+    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.9, 0.25, 0.2)),
+    physics_material=NewtonDeformableBodyMaterialCfg(
+        density=300.0,
+        particle_radius=0.008,
+        k_mu=_PROCEDURAL_DEFORMABLE_SPHERE_K_MU,
+        k_lambda=_PROCEDURAL_DEFORMABLE_SPHERE_K_LAMBDA,
+    ),
+)
+
+
+@register_asset
+class ProceduralDeformableSphere(DeformableObject):
+    """Small FEM soft sphere for deformable-object smoke tests."""
+
+    name = "procedural_deformable_sphere"
+    tags = ["object", "procedural", "deformable"]
+
+    def __init__(
+        self,
+        instance_name: str | None = None,
+        prim_path: str | None = None,
+        initial_pose: Pose | None = None,
+    ):
+        radius = _PROCEDURAL_DEFORMABLE_SPHERE_RADIUS
+        super().__init__(
+            name=instance_name if instance_name is not None else self.name,
+            prim_path=prim_path,
+            physx_spawn=_PROCEDURAL_DEFORMABLE_SPHERE_PHYSX_SPAWN_CFG,
+            newton_spawn=_PROCEDURAL_DEFORMABLE_SPHERE_NEWTON_SPAWN_CFG,
+            local_bounding_box=AxisAlignedBoundingBox(
+                min_point=(-radius, -radius, -radius),
+                max_point=(radius, radius, radius),
+            ),
+            initial_pose=initial_pose,
+        )
+
+
+_PROCEDURAL_DEFORMABLE_CUBE_SIZE = (0.06, 0.06, 0.06)
+_PROCEDURAL_DEFORMABLE_CUBE_YOUNGS_MODULUS = 2.0e5
+_PROCEDURAL_DEFORMABLE_CUBE_POISSONS_RATIO = 0.4
+_PROCEDURAL_DEFORMABLE_CUBE_K_MU, _PROCEDURAL_DEFORMABLE_CUBE_K_LAMBDA = _lame_parameters(
+    _PROCEDURAL_DEFORMABLE_CUBE_YOUNGS_MODULUS,
+    _PROCEDURAL_DEFORMABLE_CUBE_POISSONS_RATIO,
+)
+_PROCEDURAL_DEFORMABLE_CUBE_PHYSX_SPAWN_CFG = UsdFileCfg(
+    usd_path=_DEFORMABLE_CUBE_TET_USD,
+    deformable_props=PhysxDeformableBodyPropertiesCfg(
+        rest_offset=0.0,
+        contact_offset=0.001,
+        solver_position_iteration_count=24,
+        linear_damping=0.02,
+    ),
+    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.12, 0.28, 0.85)),
+    physics_material=PhysxDeformableBodyMaterialCfg(
+        poissons_ratio=_PROCEDURAL_DEFORMABLE_CUBE_POISSONS_RATIO,
+        youngs_modulus=_PROCEDURAL_DEFORMABLE_CUBE_YOUNGS_MODULUS,
+    ),
+)
+_PROCEDURAL_DEFORMABLE_CUBE_NEWTON_SPAWN_CFG = UsdFileCfg(
+    usd_path=_DEFORMABLE_CUBE_TET_USD,
+    deformable_props=NewtonDeformableBodyPropertiesCfg(),
+    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.12, 0.28, 0.85)),
+    physics_material=NewtonDeformableBodyMaterialCfg(
+        density=300.0,
+        particle_radius=0.006,
+        k_mu=_PROCEDURAL_DEFORMABLE_CUBE_K_MU,
+        k_lambda=_PROCEDURAL_DEFORMABLE_CUBE_K_LAMBDA,
+    ),
+)
+
+
+@register_asset
+class ProceduralDeformableCube(DeformableObject):
+    """Small FEM soft cube for maple-table deformable pick-and-place tests."""
+
+    name = "procedural_deformable_cube"
+    tags = ["object", "procedural", "deformable"]
+
+    def __init__(
+        self,
+        instance_name: str | None = None,
+        prim_path: str | None = None,
+        initial_pose: Pose | None = None,
+    ):
+        half_extents = tuple(size * 0.5 for size in _PROCEDURAL_DEFORMABLE_CUBE_SIZE)
+        super().__init__(
+            name=instance_name if instance_name is not None else self.name,
+            prim_path=prim_path,
+            physx_spawn=_PROCEDURAL_DEFORMABLE_CUBE_PHYSX_SPAWN_CFG,
+            newton_spawn=_PROCEDURAL_DEFORMABLE_CUBE_NEWTON_SPAWN_CFG,
+            local_bounding_box=AxisAlignedBoundingBox(
+                min_point=tuple(-extent for extent in half_extents),
+                max_point=half_extents,
+            ),
+            initial_pose=initial_pose,
         )
 
 

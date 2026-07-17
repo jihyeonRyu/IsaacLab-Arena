@@ -76,6 +76,44 @@ def check_success(
 
 # NOTE(alexmillane, 2025.09.15): The velocity threshold is set high because some stationary
 # seem to generate a "small" velocity.
+def deformable_centroid_in_proximity(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg,
+    target_object_cfg: SceneEntityCfg,
+    max_x_separation: float,
+    max_y_separation: float,
+    max_z_separation: float,
+    velocity_threshold: float | None = None,
+) -> torch.Tensor:
+    """Check whether a deformable object's centroid is close to a target asset."""
+    deformable_object = env.scene[object_cfg.name]
+    target_object = env.scene[target_object_cfg.name]
+
+    object_pos = deformable_object.data.root_pos_w.torch - env.scene.env_origins
+    target_pos = target_object.data.root_pos_w.torch - env.scene.env_origins
+
+    separation = torch.abs(object_pos - target_pos)
+    done = separation[:, 0] < max_x_separation
+    done = torch.logical_and(done, separation[:, 1] < max_y_separation)
+    done = torch.logical_and(done, separation[:, 2] < max_z_separation)
+
+    if velocity_threshold is not None:
+        object_velocity = deformable_object.data.root_vel_w.torch
+        done = torch.logical_and(done, torch.linalg.norm(object_velocity, dim=-1) < velocity_threshold)
+
+    return done
+
+
+def deformable_centroid_height_below_minimum(
+    env: ManagerBasedRLEnv,
+    minimum_height: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Terminate when a deformable object's centroid falls below ``minimum_height``."""
+    deformable_object = env.scene[asset_cfg.name]
+    return deformable_object.data.root_pos_w.torch[:, 2] < minimum_height
+
+
 def lift_object_il_success(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),

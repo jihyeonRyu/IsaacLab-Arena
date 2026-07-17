@@ -28,7 +28,9 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.sensors.camera.camera_cfg import CameraCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg, OffsetCfg
+from isaaclab.sim.spawners.from_files.from_files import spawn_from_usd
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
+from isaaclab.sim.utils import clone
 from isaaclab.utils.configclass import configclass
 
 from isaaclab_arena.assets.nucleus import ARENA_NUCLEUS_DIR
@@ -41,6 +43,57 @@ from isaaclab_arena.embodiments.franka.franka import franka_stack_events
 from isaaclab_arena.utils.cameras import ArenaCameraCfg
 from isaaclab_arena.utils.pose import Pose
 from isaaclab_arena.variations.camera_extrinsics_variation import CameraExtrinsicsVariation
+
+_DROID_GRIPPER_PRIM_NAME = "Robotiq_2F_85"
+_DROID_GRIPPER_MIN_LINK_MASS_KG = 0.02
+_DROID_GRIPPER_MIN_DIAGONAL_INERTIA = (1.0e-5, 1.0e-5, 1.0e-5)
+
+
+def _needs_positive_scalar(value: float | None) -> bool:
+    return value is None or value <= 0.0
+
+
+def _needs_positive_vector(value) -> bool:
+    return value is None or min(value) <= 0.0
+
+
+def _patch_droid_gripper_mass_properties(robot_prim) -> None:
+    """Give Robotiq moving links positive mass/inertia for Newton's MuJoCo compiler."""
+    from pxr import Gf, UsdPhysics
+
+    stack = [robot_prim]
+    while stack:
+        prim = stack.pop()
+        stack.extend(prim.GetChildren())
+        if _DROID_GRIPPER_PRIM_NAME not in str(prim.GetPath()) or not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            continue
+
+        mass_api = UsdPhysics.MassAPI(prim)
+        if not mass_api:
+            mass_api = UsdPhysics.MassAPI.Apply(prim)
+
+        mass_attr = mass_api.GetMassAttr()
+        if not mass_attr or _needs_positive_scalar(mass_attr.Get()):
+            mass_api.CreateMassAttr(_DROID_GRIPPER_MIN_LINK_MASS_KG)
+
+        inertia_attr = mass_api.GetDiagonalInertiaAttr()
+        inertia = inertia_attr.Get() if inertia_attr else None
+        if _needs_positive_vector(inertia):
+            mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(*_DROID_GRIPPER_MIN_DIAGONAL_INERTIA))
+
+
+@clone
+def spawn_droid_usd(
+    prim_path: str,
+    cfg: UsdFileCfg,
+    translation: tuple[float, float, float] | None = None,
+    orientation: tuple[float, float, float, float] | None = None,
+    **kwargs,
+):
+    """Spawn the DROID USD and patch Robotiq link inertias needed by Newton/MJWarp."""
+    prim = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
+    _patch_droid_gripper_mass_properties(prim)
+    return prim
 
 
 class DroidEmbodimentBase(EmbodimentBase, ABC):
@@ -160,6 +213,7 @@ class DroidSceneCfg:
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="{ENV_REGEX_NS}/Robot",
         spawn=sim_utils.UsdFileCfg(
+            func=spawn_droid_usd,
             usd_path=f"{ARENA_NUCLEUS_DIR}/Arena/assets/robot_library/droid/franka_robotiq_2f_85_flattened.usd",
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -396,7 +450,7 @@ class DroidCameraCfg(ArenaCameraCfg):
     """Configuration for cameras. DROID cameras are mounted with pre-set poses."""
 
     external_camera: CameraCfg = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/external_camera",
+        prim_path="{ENV_REGEX_NS}/Robot/panda_link0/external_camera",
         height=720,
         width=1280,
         data_types=["rgb"],
@@ -409,7 +463,7 @@ class DroidCameraCfg(ArenaCameraCfg):
         offset=CameraCfg.OffsetCfg(pos=(0.05, 0.57, 0.66), rot=(-0.195, 0.399, 0.805, -0.393), convention="opengl"),
     )
     external_camera_2: CameraCfg = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/external_camera_2",
+        prim_path="{ENV_REGEX_NS}/Robot/panda_link0/external_camera_2",
         height=720,
         width=1280,
         data_types=["rgb"],

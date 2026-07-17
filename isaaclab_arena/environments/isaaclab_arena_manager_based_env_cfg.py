@@ -9,6 +9,7 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mimic_env_cfg import MimicEnvCfg
 from isaaclab.sim import RenderCfg, SimulationCfg
 from isaaclab.utils.configclass import configclass
+from isaaclab_contrib.deformable.newton_manager_cfg import CoupledMJWarpVBDSolverCfg, NewtonModelCfg, VBDSolverCfg
 
 # Import from the package root so this resolves whether MJWarpSolverCfg lives in
 # newton_manager_cfg (older isaaclab_newton) or mjwarp_manager_cfg (Isaac Lab Beta 2).
@@ -18,12 +19,21 @@ from isaaclab_tasks.utils import PresetCfg
 
 
 @configclass
+class DeformableNewtonCfg(NewtonCfg):
+    """Newton physics config with global deformable-object model parameters."""
+
+    model_cfg: NewtonModelCfg | None = None
+    """Global Newton model parameters applied after builder finalization."""
+
+
+@configclass
 class ArenaPhysicsCfg(PresetCfg):
     """Physics backend presets available to all Arena environments.
 
     ``default`` / ``physx`` use the stock PhysX backend.
     ``newton`` uses MuJoCo-Warp via Newton with solver parameters tuned
     for dexterous manipulation (matches ``KukaAllegroPhysicsCfg.newton``).
+    ``newton_mjwarp_vbd`` couples the Newton rigid solver with the VBD soft-body solver.
     """
 
     physx = PhysxCfg()
@@ -43,6 +53,40 @@ class ArenaPhysicsCfg(PresetCfg):
             ccd_iterations=15000,
         ),
         num_substeps=2,
+        debug_mode=False,
+    )
+    newton_mjwarp_vbd = DeformableNewtonCfg(
+        solver_cfg=CoupledMJWarpVBDSolverCfg(
+            rigid_solver_cfg=MJWarpSolverCfg(
+                solver="newton",
+                integrator="implicitfast",
+                njmax=300,
+                nconmax=400,
+                impratio=10.0,
+                cone="elliptic",
+                update_data_interval=2,
+                iterations=100,
+                ls_iterations=15,
+                ls_parallel=False,
+                ccd_iterations=15000,
+            ),
+            soft_solver_cfg=VBDSolverCfg(
+                iterations=10,
+                integrate_with_external_rigid_solver=True,
+                particle_enable_self_contact=False,
+                particle_collision_detection_interval=-1,
+            ),
+            coupling_mode="two_way",
+        ),
+        model_cfg=NewtonModelCfg(
+            soft_contact_ke=1.0e4,
+            soft_contact_kd=1.0e-5,
+            soft_contact_mu=5.0,
+            shape_material_ke=4.0e4,
+            shape_material_kd=1.0e-5,
+            shape_material_mu=5.0,
+        ),
+        num_substeps=10,
         debug_mode=False,
     )
     default = physx

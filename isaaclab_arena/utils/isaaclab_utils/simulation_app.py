@@ -5,12 +5,15 @@
 
 import argparse
 import gc
+import glob
 import os
 import sys
+import tempfile
 import torch
 import traceback
 from contextlib import nullcontext, suppress
 
+import isaaclab.app as isaaclab_app
 import omni.kit.app
 from isaaclab.app import AppLauncher
 
@@ -22,11 +25,82 @@ def get_isaac_sim_version() -> str:
 
 STARTUP_COMPLETE_MARKER = "[isaaclab-arena] AppLauncher initialization complete"
 
+# The GUI experience (``isaaclab.python.kit``, selected for ``--viz kit`` without cameras) declares a
+# dependency on this Isaac Sim extension. During the Isaac Lab Beta 2 upgrade the bundled Isaac Sim
+# image does not provide it, so the Kit app fails to start with a dependency-resolution error.
+_MISSING_GUI_EXTENSION = "isaacsim.sensors.experimental.rtx"
+
+
+def _isaaclab_apps_dir() -> str:
+    """Return the Isaac Lab ``apps`` directory (matching AppLauncher's own resolution)."""
+    return os.path.join(os.path.dirname(os.path.abspath(isaaclab_app.__file__)), *[".."] * 4, "apps")
+
+
+def _extension_is_available(ext_name: str) -> bool:
+    """Return whether a Kit extension directory is present in the Isaac Sim install."""
+    exp_path = os.environ.get("EXP_PATH", "")
+    if not exp_path:
+        return True  # can't tell -> assume present and don't patch
+    base = os.path.dirname(exp_path)
+    exts_dirs = ("exts", "extscache", os.path.join("kit", "exts"))
+    return any(glob.glob(os.path.join(base, exts_dir, ext_name + "*")) for exts_dir in exts_dirs)
+
+
+def _maybe_patch_gui_experience(args: argparse.Namespace) -> None:
+    """Work around the Beta 2 upgrade skew that breaks the ``--viz kit`` GUI experience.
+
+    When the plain GUI experience (``isaaclab.python.kit``) would be selected and it depends on an
+    Isaac Sim extension the current image does not provide, write a patched copy with that dependency
+    removed and point AppLauncher at it via ``args.experience``. No-op when a custom experience is
+    already requested, when the GUI experience is not the one being launched, or on images where the
+    extension is present (i.e. after the Isaac Sim image is bumped to match Beta 2).
+    """
+    if getattr(args, "experience", "") not in ("", None):
+        return
+    visualizers = getattr(args, "visualizer", None) or []
+    is_plain_gui = (
+        "kit" in visualizers and not getattr(args, "enable_cameras", False) and not getattr(args, "xr", False)
+    )
+    if not is_plain_gui:
+        return
+
+    source_kit = os.path.join(_isaaclab_apps_dir(), "isaaclab.python.kit")
+    if not os.path.isfile(source_kit):
+        return
+    with open(source_kit, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    if not any(_MISSING_GUI_EXTENSION in ln for ln in lines) or _extension_is_available(_MISSING_GUI_EXTENSION):
+        return  # unaffected image; leave the experience untouched
+
+    apps_dir = os.path.dirname(source_kit)
+    lab_source = os.path.abspath(os.path.join(apps_dir, "..", "source"))
+    patched: list[str] = []
+    for ln in lines:
+        if _MISSING_GUI_EXTENSION in ln:
+            continue  # drop the unresolved dependency
+        patched.append(ln)
+        if ln.strip().startswith("folders = ["):
+            # ${app}-relative ext folders no longer resolve once the .kit lives outside apps/,
+            # so add absolute paths to the Isaac Lab apps/ and source/ extension roots.
+            patched.append(f'    "{apps_dir}",')
+            patched.append(f'    "{lab_source}",')
+
+    fd, patched_path = tempfile.mkstemp(prefix="arena_viz_", suffix=".kit")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(patched) + "\n")
+    args.experience = patched_path
+    sys.__stderr__.write(
+        f"[isaaclab-arena] '{_MISSING_GUI_EXTENSION}' is unavailable in this Isaac Sim image; "
+        f"launching --viz kit with a patched experience file: {patched_path}\n"
+    )
+    sys.__stderr__.flush()
+
 
 def get_app_launcher(args: argparse.Namespace) -> AppLauncher:
     """Get an app launcher."""
     import time
 
+    _maybe_patch_gui_experience(args)
     t0 = time.monotonic()
     app_launcher = AppLauncher(args)
     elapsed = time.monotonic() - t0
