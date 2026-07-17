@@ -133,9 +133,17 @@ def _test_deformable_sphere_droid_newton_smoke(simulation_app) -> bool:
     """Boot the shipped deformable env with DROID on Newton VBD and check the soft body simulates."""
     import torch
 
+    import omni.usd
+    import warp as wp
+    from isaaclab.managers import SceneEntityCfg
+    from isaaclab_contrib.deformable.coupled_mjwarp_vbd_manager import NewtonCoupledMJWarpVBDManager
+    from pxr import Usd, UsdGeom
+
     from isaaclab_arena.assets.registries import EnvironmentRegistry
     from isaaclab_arena.cli.isaaclab_arena_cli import arena_env_builder_cfg_from_argparse, get_isaaclab_arena_cli_parser
     from isaaclab_arena.environments.arena_env_builder import ArenaEnvBuilder
+    from isaaclab_arena.terms.events import set_deformable_object_pose
+    from isaaclab_arena.utils.pose import Pose
     from isaaclab_arena_environments.cli import (
         build_environment_from_cli,
         ensure_environments_registered,
@@ -165,20 +173,119 @@ def _test_deformable_sphere_droid_newton_smoke(simulation_app) -> bool:
         assert env.action_manager.total_action_dim == 8
 
         env.reset()
+        robot = env.scene["robot"]
         asset = env.scene["procedural_deformable_sphere"]
         nodal_before = asset.data.nodal_pos_w.torch.clone()
         assert nodal_before.shape[1] > 0, "deformable has no simulation nodes"
         assert torch.isfinite(nodal_before).all(), "nodal positions not finite after reset"
 
-        zero_action = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
+        hold_action = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
+        hold_action[:, :7] = robot.data.joint_pos.torch[:, :7]
         for _ in range(15):
-            env.step(zero_action)
+            env.step(hold_action)
 
         nodal_after = asset.data.nodal_pos_w.torch
         assert torch.isfinite(nodal_after).all(), "nodal positions diverged (non-finite) after stepping"
         # The VBD solver must actually advance the soft body under gravity/contact.
         max_delta = (nodal_after - nodal_before).abs().max().item()
         assert max_delta > 1e-5, f"deformable did not move under Newton stepping (max delta {max_delta})"
+
+        shape_labels = [str(label) for label in NewtonCoupledMJWarpVBDManager._model.shape_label]
+        fingertip_shape_ids = [
+            shape_id
+            for shape_id, label in enumerate(shape_labels)
+            if "/Robotiq_2F_85/" in label
+            and any(mesh_name in label for mesh_name in ("fingertipsstep", "finger4step"))
+            and not label.endswith("_visual")
+        ]
+        assert (
+            fingertip_shape_ids
+        ), "Newton imported no Robotiq fingertip mesh collision shapes; labels were:\n" + "\n".join(
+            label for label in shape_labels if "/Robotiq_2F_85/" in label
+        )
+        right_fingertip_shape_ids = [
+            shape_id
+            for shape_id in fingertip_shape_ids
+            if "/right_inner_finger/" in shape_labels[shape_id] and "fingertipsstep" in shape_labels[shape_id]
+        ]
+        assert right_fingertip_shape_ids, "Newton imported no right Robotiq fingertip collision mesh"
+        right_fingertip_shape_id = right_fingertip_shape_ids[0]
+
+        stage = omni.usd.get_context().get_stage()
+        fingertip_prim = stage.GetPrimAtPath(shape_labels[right_fingertip_shape_id])
+        assert fingertip_prim.IsValid(), f"right fingertip collision prim is missing: {right_fingertip_shape_id}"
+        fingertip_bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]).ComputeWorldBound(
+            fingertip_prim
+        )
+        fingertip_center = fingertip_bbox.ComputeAlignedBox().GetMidpoint()
+        contact_position = (float(fingertip_center[0]), float(fingertip_center[1]), float(fingertip_center[2]))
+        set_deformable_object_pose(
+            env,
+            env_ids=torch.tensor([0], device=env.device),
+            asset_cfg=SceneEntityCfg("procedural_deformable_sphere"),
+            pose=Pose(position_xyz=contact_position),
+        )
+        nodal_before_contact = asset.data.nodal_pos_w.torch.clone()
+        for _ in range(4):
+            env.step(hold_action)
+        contacts = NewtonCoupledMJWarpVBDManager._contacts
+        soft_contact_count = int(wp.to_torch(contacts.soft_contact_count).cpu().item())
+        contact_shape_ids = {
+            int(shape_id)
+            for shape_id in wp.to_torch(contacts.soft_contact_shape)[:soft_contact_count].detach().cpu().tolist()
+        }
+        assert (
+            right_fingertip_shape_id in contact_shape_ids
+        ), "deformable/right_inner_finger overlap produced no Newton soft contacts with Robotiq fingertip meshes"
+        contact_delta = (asset.data.nodal_pos_w.torch - nodal_before_contact).abs().max().item()
+        assert contact_delta > 1e-5, f"deformable did not react to fingertip contact (max delta {contact_delta})"
+
+        set_deformable_object_pose(
+            env,
+            env_ids=torch.tensor([0], device=env.device),
+            asset_cfg=SceneEntityCfg("procedural_deformable_sphere"),
+            pose=Pose(position_xyz=(0.7, 0.3, 0.2)),
+        )
+        for _ in range(2):
+            env.step(hold_action)
+
+        gripper_joint_names = [
+            "finger_joint",
+            "left_inner_finger_joint",
+            "left_inner_finger_knuckle_joint",
+            "right_outer_knuckle_joint",
+            "right_inner_finger_joint",
+            "right_inner_finger_knuckle_joint",
+        ]
+        joint_ids = [robot.joint_names.index(joint_name) for joint_name in gripper_joint_names]
+        close_targets = torch.tensor(
+            [
+                torch.pi / 4,
+                -torch.pi / 4,
+                -torch.pi / 4,
+                torch.pi / 4,
+                torch.pi / 4,
+                -torch.pi / 4,
+            ],
+            device=env.device,
+        )
+        action = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
+        action[:, :7] = robot.data.joint_pos.torch[:, :7]
+        action[:, 7] = 1.0
+        for _ in range(80):
+            env.step(action)
+        gripper_close_pos = robot.data.joint_pos.torch[0, joint_ids]
+        assert torch.allclose(
+            gripper_close_pos, close_targets, atol=0.03
+        ), f"DROID gripper did not close to controlled Robotiq targets: {gripper_close_pos}"
+
+        action[:, 7] = 0.0
+        for _ in range(80):
+            env.step(action)
+        gripper_open_pos = robot.data.joint_pos.torch[0, joint_ids]
+        assert torch.allclose(
+            gripper_open_pos, torch.zeros_like(gripper_open_pos), atol=0.02
+        ), f"DROID gripper did not reopen stably: {gripper_open_pos}"
     finally:
         env.close()
     return True

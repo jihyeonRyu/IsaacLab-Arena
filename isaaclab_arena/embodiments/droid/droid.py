@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import math
 import torch
 from abc import ABC
 from typing import Any
@@ -47,6 +48,24 @@ from isaaclab_arena.variations.camera_extrinsics_variation import CameraExtrinsi
 _DROID_GRIPPER_PRIM_NAME = "Robotiq_2F_85"
 _DROID_GRIPPER_MIN_LINK_MASS_KG = 0.02
 _DROID_GRIPPER_MIN_DIAGONAL_INERTIA = (1.0e-5, 1.0e-5, 1.0e-5)
+_DROID_GRIPPER_JOINT_NAMES = (
+    "finger_joint",
+    "left_inner_finger_joint",
+    "left_inner_finger_knuckle_joint",
+    "right_outer_knuckle_joint",
+    "right_inner_finger_joint",
+    "right_inner_finger_knuckle_joint",
+)
+_DROID_GRIPPER_OPEN_COMMAND = {joint_name: 0.0 for joint_name in _DROID_GRIPPER_JOINT_NAMES}
+_DROID_GRIPPER_CLOSE_POSITION = math.pi / 4
+_DROID_GRIPPER_CLOSE_COMMAND = {
+    "finger_joint": _DROID_GRIPPER_CLOSE_POSITION,
+    "left_inner_finger_joint": -_DROID_GRIPPER_CLOSE_POSITION,
+    "left_inner_finger_knuckle_joint": -_DROID_GRIPPER_CLOSE_POSITION,
+    "right_outer_knuckle_joint": _DROID_GRIPPER_CLOSE_POSITION,
+    "right_inner_finger_joint": _DROID_GRIPPER_CLOSE_POSITION,
+    "right_inner_finger_knuckle_joint": -_DROID_GRIPPER_CLOSE_POSITION,
+}
 
 
 def _needs_positive_scalar(value: float | None) -> bool:
@@ -82,6 +101,51 @@ def _patch_droid_gripper_mass_properties(robot_prim) -> None:
             mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(*_DROID_GRIPPER_MIN_DIAGONAL_INERTIA))
 
 
+def _patch_droid_gripper_collision_mesh_schemas(robot_prim) -> None:
+    """Move Robotiq collision schemas onto mesh prims so Newton imports them."""
+    from pxr import UsdGeom, UsdPhysics
+
+    stack = [robot_prim]
+    while stack:
+        prim = stack.pop()
+        stack.extend(prim.GetChildren())
+
+        prim_path = str(prim.GetPath())
+        if _DROID_GRIPPER_PRIM_NAME not in prim_path:
+            continue
+        if prim.IsA(UsdGeom.Mesh):
+            continue
+        if not prim.HasAPI(UsdPhysics.CollisionAPI) or not prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+            continue
+
+        mesh_children = [child for child in prim.GetChildren() if child.IsA(UsdGeom.Mesh)]
+        if not mesh_children:
+            continue
+
+        parent_collision_api = UsdPhysics.CollisionAPI(prim)
+        parent_mesh_collision_api = UsdPhysics.MeshCollisionAPI(prim)
+        collision_enabled = parent_collision_api.GetCollisionEnabledAttr().Get()
+        mesh_approximation = parent_mesh_collision_api.GetApproximationAttr().Get()
+
+        for child in mesh_children:
+            if not child.HasAPI(UsdPhysics.CollisionAPI):
+                child_collision_api = UsdPhysics.CollisionAPI.Apply(child)
+            else:
+                child_collision_api = UsdPhysics.CollisionAPI(child)
+            if collision_enabled is not None:
+                child_collision_api.CreateCollisionEnabledAttr(collision_enabled)
+
+            if not child.HasAPI(UsdPhysics.MeshCollisionAPI):
+                child_mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(child)
+            else:
+                child_mesh_collision_api = UsdPhysics.MeshCollisionAPI(child)
+            if mesh_approximation is not None:
+                child_mesh_collision_api.CreateApproximationAttr(mesh_approximation)
+
+        prim.RemoveAPI(UsdPhysics.MeshCollisionAPI)
+        prim.RemoveAPI(UsdPhysics.CollisionAPI)
+
+
 @clone
 def spawn_droid_usd(
     prim_path: str,
@@ -90,9 +154,10 @@ def spawn_droid_usd(
     orientation: tuple[float, float, float, float] | None = None,
     **kwargs,
 ):
-    """Spawn the DROID USD and patch Robotiq link inertias needed by Newton/MJWarp."""
+    """Spawn the DROID USD and patch Robotiq schemas needed by Newton/MJWarp."""
     prim = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
     _patch_droid_gripper_mass_properties(prim)
+    _patch_droid_gripper_collision_mesh_schemas(prim)
     return prim
 
 
@@ -260,10 +325,11 @@ class DroidSceneCfg:
                 damping=80.0,
             ),
             "gripper": ImplicitActuatorCfg(
-                joint_names_expr=["finger_joint"],
-                stiffness=None,
-                damping=None,
-                velocity_limit=1.0,
+                joint_names_expr=list(_DROID_GRIPPER_JOINT_NAMES),
+                effort_limit_sim=80.0,
+                velocity_limit_sim=2.0,
+                stiffness=200.0,
+                damping=20.0,
             ),
         },
     )
@@ -343,9 +409,9 @@ class DroidDifferentialIKActionsCfg:
 
     gripper_action: ActionTermCfg = BinaryJointPositionZeroToOneActionCfg(
         asset_name="robot",
-        joint_names=["finger_joint"],
-        open_command_expr={"finger_joint": 0.0},
-        close_command_expr={"finger_joint": torch.pi / 4},
+        joint_names=list(_DROID_GRIPPER_JOINT_NAMES),
+        open_command_expr=dict(_DROID_GRIPPER_OPEN_COMMAND),
+        close_command_expr=dict(_DROID_GRIPPER_CLOSE_COMMAND),
     )
 
 
@@ -361,9 +427,9 @@ class DroidRelativeJointPositionActionsCfg:
     )
     gripper_action: ActionTermCfg = BinaryJointPositionZeroToOneActionCfg(
         asset_name="robot",
-        joint_names=["finger_joint"],
-        open_command_expr={"finger_joint": 0.0},
-        close_command_expr={"finger_joint": torch.pi / 4},
+        joint_names=list(_DROID_GRIPPER_JOINT_NAMES),
+        open_command_expr=dict(_DROID_GRIPPER_OPEN_COMMAND),
+        close_command_expr=dict(_DROID_GRIPPER_CLOSE_COMMAND),
     )
 
 
@@ -380,9 +446,9 @@ class DroidAbsoluteJointPositionActionsCfg:
 
     gripper_action: ActionTermCfg = BinaryJointPositionZeroToOneActionCfg(
         asset_name="robot",
-        joint_names=["finger_joint"],
-        open_command_expr={"finger_joint": 0.0},
-        close_command_expr={"finger_joint": torch.pi / 4},
+        joint_names=list(_DROID_GRIPPER_JOINT_NAMES),
+        open_command_expr=dict(_DROID_GRIPPER_OPEN_COMMAND),
+        close_command_expr=dict(_DROID_GRIPPER_CLOSE_COMMAND),
     )
 
 
