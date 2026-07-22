@@ -1,0 +1,62 @@
+# Copyright (c) 2026, The Isaac Lab Arena Project Developers (https://github.com/isaac-sim/IsaacLab-Arena/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Evaluate each task cardinality separately so success rate is reported for
+# one-, two-, and three-blue-cube episodes instead of hiding the hard cases in
+# one aggregate number.
+runs:
+  franka_blue_tray_1_cube:
+    environment:
+      type: blue_cube_tray
+      enable_cameras: true
+      num_blue_cubes: 1
+      num_red_cubes: 2
+    environment_builder:
+      num_envs: 4
+      solve_relations: false
+      seed: 101
+      language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
+    policy: &franka_eef_policy
+      type: isaaclab_arena_gr00t.policy.franka_eef_remote_policy.FrankaEefRemotePolicy
+      policy_device: cuda:0
+      remote_host: 127.0.0.1
+      remote_port: 5555
+      action_horizon: 16
+      action_chunk_length: 16
+      policy_hz: 15
+      control_hz: 60
+      interpolate_actions: true
+    rollout_limit:
+      num_episodes: 10
+
+  franka_blue_tray_2_cubes:
+    environment:
+      type: blue_cube_tray
+      enable_cameras: true
+      num_blue_cubes: 2
+      num_red_cubes: 2
+    environment_builder:
+      num_envs: 4
+      solve_relations: false
+      seed: 202
+      language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
+    policy: *franka_eef_policy
+    rollout_limit:
+      num_episodes: 10
+
+  franka_blue_tray_3_cubes:
+    environment:
+      type: blue_cube_tray
+      enable_cameras: true
+      num_blue_cubes: 3
+      num_red_cubes: 2
+    environment_builder:
+      num_envs: 4
+      solve_relations: false
+      seed: 303
+      language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
+    policy: *franka_eef_policy
+    rollout_limit:
+      num_episodes: 10
