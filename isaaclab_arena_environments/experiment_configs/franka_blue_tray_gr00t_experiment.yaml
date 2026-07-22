@@ -28,6 +28,8 @@ runs:
       policy_hz: 15
       control_hz: 60
       interpolate_actions: true
+      max_translation_action: 0.0375
+      max_rotation_action: 0.0666667
     rollout_limit:
       num_episodes: 10
 

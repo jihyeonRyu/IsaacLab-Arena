@@ -9,22 +9,11 @@ from __future__ import annotations
 
 import math
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import isaaclab.sim as sim_utils
-from isaaclab.managers import EventTermCfg
-from isaaclab.sensors import CameraCfg
-from isaaclab.utils.configclass import configclass
-
-from isaaclab_arena.assets.object import Object
-from isaaclab_arena.assets.object_base import ObjectType
 from isaaclab_arena.assets.register import register_environment
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
-from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
-from isaaclab_arena.utils.cameras import ArenaCameraCfg
-from isaaclab_arena.utils.configclass import make_configclass
-from isaaclab_arena.utils.pose import Pose
 
 if TYPE_CHECKING:
     from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
@@ -35,101 +24,6 @@ RED = (0.9899, 0.0162, 0.0290)
 GREEN = (0.1244, 0.5804, 0.1832)
 TABLETOP_FRANKA_POSE = [0.50, -0.569, 0.0, -2.810, 0.0, 3.037, 0.741, 0.040, 0.040]
 
-
-class ProceduralCuboid(Object):
-    """Arena object backed by one procedural cuboid with an explicit AABB."""
-
-    def __init__(
-        self,
-        name: str,
-        size: tuple[float, float, float],
-        color: tuple[float, float, float],
-        initial_pose: Pose,
-        *,
-        kinematic: bool = False,
-        mass: float = 0.06,
-    ):
-        self.size = tuple(float(value) for value in size)
-        spawner = sim_utils.CuboidCfg(
-            size=self.size,
-            semantic_tags=[("class", name.rsplit("_", 1)[0])],
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=kinematic,
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005),
-            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=0.70,
-                dynamic_friction=0.58,
-                restitution=0.04,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color, roughness=0.55),
-        )
-        super().__init__(
-            name=name,
-            prim_path=f"{{ENV_REGEX_NS}}/{name}",
-            object_type=ObjectType.RIGID,
-            spawner_cfg=spawner,
-            initial_pose=initial_pose,
-        )
-
-    def get_bounding_box(self) -> AxisAlignedBoundingBox:
-        half = tuple(0.5 * value for value in self.size)
-        return AxisAlignedBoundingBox(tuple(-value for value in half), half)
-
-    def get_world_bounding_box(self) -> AxisAlignedBoundingBox:
-        bbox = self.get_bounding_box()
-        pose = self._get_initial_pose_as_pose()
-        return bbox if pose is None else bbox.translated(pose.position_xyz)
-
-    def get_corners(self, pos: torch.Tensor) -> torch.Tensor:
-        return self.get_bounding_box().get_corners_at(pos)
-
-
-@configclass
-class BlueTrayFrankaCameraCfg(ArenaCameraCfg):
-    """The two RGB views used to train the Franka GR00T checkpoint."""
-
-    external_camera: CameraCfg = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/external_camera",
-        update_period=1.0 / 15.0,
-        height=256,
-        width=320,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=18.0,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.05, 20.0),
-        ),
-        # eye=(1.3,-1.3,1.0), target=(0.35,0.0,0.25), OpenGL camera frame.
-        offset=CameraCfg.OffsetCfg(
-            pos=(1.3, -1.3, 1.0),
-            rot=(0.5109, 0.1668, 0.2617, 0.8016),
-            convention="opengl",
-        ),
-    )
-    wrist_camera: CameraCfg = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/panda_hand/wrist_camera",
-        update_period=1.0 / 15.0,
-        height=256,
-        width=320,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=12.0,
-            focus_distance=0.30,
-            horizontal_aperture=20.955,
-            clipping_range=(0.02, 5.0),
-        ),
-        # Equivalent fixed mount for source eye=(.10,0,-.08), target=(0,0,.12).
-        offset=CameraCfg.OffsetCfg(
-            pos=(0.10, 0.0, -0.08),
-            rot=(0.6882, 0.6882, 0.1625, 0.1625),
-            convention="opengl",
-        ),
-    )
 
 
 def reset_blue_tray_layout(
@@ -199,7 +93,7 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
     num_blue_cubes: int = 3
     num_red_cubes: int = 2
     cube_size: float = 0.05
-    tray_size: tuple[float, float, float] = (0.22, 0.18, 0.025)
+    tray_size: list[float] = field(default_factory=lambda: [0.22, 0.18, 0.025])
     min_spawn_spacing: float = 0.025
     episode_length_s: float = 75.0
 
@@ -207,6 +101,7 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
         assert 1 <= self.num_blue_cubes <= 3
         assert 0 <= self.num_red_cubes <= 3
         assert self.cube_size > 0.0
+        assert len(self.tray_size) == 3
 
 
 @register_environment
@@ -220,6 +115,114 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
         from isaaclab_arena.scene.scene import Scene
         from isaaclab_arena.tasks.blue_cube_tray_task import BlueCubeTrayTask
+
+        # Environment discovery happens before SimulationApp starts. Keep all
+        # Isaac/pxr-dependent imports and classes deferred until build time.
+        import isaaclab.sim as sim_utils
+        from isaaclab.managers import EventTermCfg
+        from isaaclab.sensors import CameraCfg
+        from isaaclab.utils.configclass import configclass
+
+        from isaaclab_arena.assets.object import Object
+        from isaaclab_arena.assets.object_base import ObjectType
+        from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
+        from isaaclab_arena.utils.cameras import ArenaCameraCfg
+        from isaaclab_arena.utils.configclass import make_configclass
+        from isaaclab_arena.utils.pose import Pose
+
+        class ProceduralCuboid(Object):
+            """Arena object backed by one procedural cuboid with an explicit AABB."""
+
+            def __init__(
+                self,
+                name: str,
+                size: tuple[float, float, float],
+                color: tuple[float, float, float],
+                initial_pose: Pose,
+                *,
+                kinematic: bool = False,
+                mass: float = 0.06,
+            ):
+                self.size = tuple(float(value) for value in size)
+                spawner = sim_utils.CuboidCfg(
+                    size=self.size,
+                    semantic_tags=[("class", name.rsplit("_", 1)[0])],
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                        kinematic_enabled=kinematic,
+                        solver_position_iteration_count=16,
+                        solver_velocity_iteration_count=1,
+                    ),
+                    collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005),
+                    mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+                    physics_material=sim_utils.RigidBodyMaterialCfg(
+                        static_friction=0.70,
+                        dynamic_friction=0.58,
+                        restitution=0.04,
+                    ),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color, roughness=0.55),
+                )
+                super().__init__(
+                    name=name,
+                    prim_path=f"{{ENV_REGEX_NS}}/{name}",
+                    object_type=ObjectType.RIGID,
+                    spawner_cfg=spawner,
+                    initial_pose=initial_pose,
+                )
+
+            def get_bounding_box(self) -> AxisAlignedBoundingBox:
+                half = tuple(0.5 * value for value in self.size)
+                return AxisAlignedBoundingBox(tuple(-value for value in half), half)
+
+            def get_world_bounding_box(self) -> AxisAlignedBoundingBox:
+                bbox = self.get_bounding_box()
+                pose = self._get_initial_pose_as_pose()
+                return bbox if pose is None else bbox.translated(pose.position_xyz)
+
+            def get_corners(self, pos: torch.Tensor) -> torch.Tensor:
+                return self.get_bounding_box().get_corners_at(pos)
+
+        @configclass
+        class BlueTrayFrankaCameraCfg(ArenaCameraCfg):
+            """The two RGB views used to train the Franka GR00T checkpoint."""
+
+            external_camera: CameraCfg = CameraCfg(
+                prim_path="{ENV_REGEX_NS}/external_camera",
+                update_period=1.0 / 15.0,
+                height=256,
+                width=320,
+                data_types=["rgb"],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=18.0,
+                    focus_distance=400.0,
+                    horizontal_aperture=20.955,
+                    clipping_range=(0.05, 20.0),
+                ),
+                # eye=(1.3,-1.3,1.0), target=(0.35,0.0,0.25), OpenGL frame.
+                offset=CameraCfg.OffsetCfg(
+                    pos=(1.3, -1.3, 1.0),
+                    rot=(0.5109, 0.1668, 0.2617, 0.8016),
+                    convention="opengl",
+                ),
+            )
+            wrist_camera: CameraCfg = CameraCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/panda_hand/wrist_camera",
+                update_period=1.0 / 15.0,
+                height=256,
+                width=320,
+                data_types=["rgb"],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=12.0,
+                    focus_distance=0.30,
+                    horizontal_aperture=20.955,
+                    clipping_range=(0.02, 5.0),
+                ),
+                # Source-equivalent mount: eye=(.10,0,-.08), target=(0,0,.12).
+                offset=CameraCfg.OffsetCfg(
+                    pos=(0.10, 0.0, -0.08),
+                    rot=(0.6882, 0.6882, 0.1625, 0.1625),
+                    convention="opengl",
+                ),
+            )
 
         table = self.asset_registry.get_asset_by_name("table")()
         table.set_initial_pose(Pose(position_xyz=(0.5, 0.0, 0.0), rotation_xyzw=(0.0, 0.0, 0.0, 1.0)))

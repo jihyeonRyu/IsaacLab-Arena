@@ -85,6 +85,24 @@ def add_experiment_runner_arguments(parser: argparse.ArgumentParser) -> None:
         help="Continue evaluation with remaining Runs when a Run fails instead of stopping immediately.",
     )
     parser.add_argument(
+        "--remote_host",
+        type=str,
+        default=None,
+        help=(
+            "Override remote_host on every policy in the Experiment that exposes that field. "
+            "Useful for selecting a policy server without editing the YAML config."
+        ),
+    )
+    parser.add_argument(
+        "--remote_port",
+        type=int,
+        default=None,
+        help=(
+            "Override remote_port on every policy in the Experiment that exposes that field. "
+            "Must be between 1 and 65535."
+        ),
+    )
+    parser.add_argument(
         "--chunk_size",
         type=int,
         default=None,
@@ -108,5 +126,7 @@ def parse_experiment_runner_args(argv: list[str] | None = None) -> tuple[argpars
     parser.allow_abbrev = False
     args_cli, experiment_overrides = parser.parse_known_args(argv)
     assert_hydra_overrides(experiment_overrides, parser)
+    if args_cli.remote_port is not None and not 1 <= args_cli.remote_port <= 65535:
+        parser.error("--remote_port must be between 1 and 65535")
     assert not args_cli.distributed, "Distributed evaluation is not supported yet"
     return args_cli, experiment_overrides

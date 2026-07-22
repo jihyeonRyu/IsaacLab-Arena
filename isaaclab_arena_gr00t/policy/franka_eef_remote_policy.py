@@ -71,8 +71,8 @@ class FrankaEefRemotePolicyCfg(PolicyCfg):
     eef_action_key: str = "eef_delta"
     gripper_action_key: str = "gripper"
     language_key: str = "annotation.human.action.task_description"
-    max_translation_action: float = 0.08
-    max_rotation_action: float = 0.15
+    max_translation_action: float = 0.0375
+    max_rotation_action: float = 0.0666667
 
     def __post_init__(self) -> None:
         assert self.num_envs > 0

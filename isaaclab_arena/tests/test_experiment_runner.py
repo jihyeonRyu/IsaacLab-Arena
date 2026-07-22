@@ -33,6 +33,21 @@ def test_experiment_runner_parses_native_hydra_overrides():
     ]
 
 
+def test_experiment_runner_parses_remote_policy_endpoint_override():
+    args_cli, experiment_overrides = parse_experiment_runner_args([
+        "--experiment_config",
+        "experiment.yaml",
+        "--remote_host",
+        "policy.example.com",
+        "--remote_port",
+        "5555",
+    ])
+
+    assert args_cli.remote_host == "policy.example.com"
+    assert args_cli.remote_port == 5555
+    assert experiment_overrides == []
+
+
 def test_experiment_runner_parses_timestamped_base_or_exact_output_directory(tmp_path):
     exact_experiment_output_directory = tmp_path / "exact-experiment-output"
     timestamped_experiment_output_base_directory = tmp_path / "timestamped-experiment-outputs"

@@ -66,6 +66,37 @@ def _assert_exact_experiment_output_directory_is_available(experiment_output_dir
         )
 
 
+def _override_remote_policy_endpoint(
+    experiment_cfg: ArenaExperimentCfg,
+    remote_host: str | None,
+    remote_port: int | None,
+) -> None:
+    """Apply one CLI-selected endpoint to every compatible policy in an Experiment."""
+    if remote_host is None and remote_port is None:
+        return
+
+    overridden_runs = []
+    for run_cfg in experiment_cfg.runs.values():
+        policy_cfg = run_cfg.policy
+        if not hasattr(policy_cfg, "remote_host") or not hasattr(policy_cfg, "remote_port"):
+            continue
+        if remote_host is not None:
+            policy_cfg.remote_host = remote_host
+        if remote_port is not None:
+            policy_cfg.remote_port = remote_port
+        overridden_runs.append(run_cfg.name)
+
+    if not overridden_runs:
+        raise ValueError("--remote_host/--remote_port were provided, but no Experiment policy supports them")
+    endpoint_host = remote_host if remote_host is not None else "<from-config>"
+    endpoint_port = remote_port if remote_port is not None else "<from-config>"
+    print(
+        f"[INFO] Remote policy endpoint override: {endpoint_host}:{endpoint_port} "
+        f"for Runs {overridden_runs}",
+        flush=True,
+    )
+
+
 def main():
     args_cli, experiment_overrides = parse_experiment_runner_args()
     experiment_config_path = validate_experiment_config_path(args_cli.experiment_config)
@@ -87,6 +118,7 @@ def main():
                 device=args_cli.device,
                 overrides=experiment_overrides,
             )
+            _override_remote_policy_endpoint(experiment_cfg, args_cli.remote_host, args_cli.remote_port)
             _assert_camera_support_enabled(experiment_cfg, args_cli.enable_cameras)
             list_variations(experiment_cfg)
         return
@@ -121,6 +153,7 @@ def main():
             device=args_cli.device,
             overrides=experiment_overrides,
         )
+        _override_remote_policy_endpoint(experiment_cfg, args_cli.remote_host, args_cli.remote_port)
         _assert_camera_support_enabled(experiment_cfg, args_cli.enable_cameras)
         metrics_logger = MetricsLogger()
 
