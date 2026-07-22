@@ -30,15 +30,23 @@ def _root_lin_vel(env, asset_name: str) -> torch.Tensor:
     return wp.to_torch(env.scene[asset_name].data.root_lin_vel_w)
 
 
+def _object_sizes(env, asset_name: str, fallback: tuple[float, float, float]) -> torch.Tensor:
+    """Return the physical XYZ size for every env clone."""
+    sizes = getattr(env, "_blue_tray_cube_sizes", {}).get(asset_name)
+    if sizes is not None:
+        return sizes.to(device=env.device)
+    return torch.tensor(fallback, device=env.device).expand(env.num_envs, -1)
+
+
 def _inside_tray_xy(
     object_pos: torch.Tensor,
     tray_pos: torch.Tensor,
     tray_half_extents_xy: tuple[float, float],
-    object_half_extents_xy: tuple[float, float],
+    object_half_extents_xy: torch.Tensor,
     margin: float,
 ) -> torch.Tensor:
-    available_x = tray_half_extents_xy[0] - object_half_extents_xy[0] - margin
-    available_y = tray_half_extents_xy[1] - object_half_extents_xy[1] - margin
+    available_x = tray_half_extents_xy[0] - object_half_extents_xy[:, 0] - margin
+    available_y = tray_half_extents_xy[1] - object_half_extents_xy[:, 1] - margin
     return (torch.abs(object_pos[:, 0] - tray_pos[:, 0]) <= available_x) & (
         torch.abs(object_pos[:, 1] - tray_pos[:, 1]) <= available_y
     )
@@ -59,15 +67,16 @@ def all_blue_cubes_in_tray(
     tray_top = tray_pos[:, 2] + 0.5 * tray_size[2]
     result = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
     for name, size in zip(blue_cube_names, cube_sizes, strict=True):
+        physical_size = _object_sizes(env, name, size)
         pos = _root_pos(env, name)
         inside_xy = _inside_tray_xy(
             pos,
             tray_pos,
             (0.5 * tray_size[0], 0.5 * tray_size[1]),
-            (0.5 * size[0], 0.5 * size[1]),
+            0.5 * physical_size[:, :2],
             xy_margin,
         )
-        bottom = pos[:, 2] - 0.5 * size[2]
+        bottom = pos[:, 2] - 0.5 * physical_size[:, 2]
         valid_z = (bottom >= tray_top - 0.012) & (pos[:, 2] <= tray_top + max_stack_height)
         settled = torch.linalg.vector_norm(_root_lin_vel(env, name), dim=-1) < velocity_threshold
         result &= inside_xy & valid_z & settled
@@ -86,15 +95,16 @@ def any_red_cube_in_tray(
     tray_top = tray_pos[:, 2] + 0.5 * tray_size[2]
     result = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     for name, size in zip(red_cube_names, cube_sizes, strict=True):
+        physical_size = _object_sizes(env, name, size)
         pos = _root_pos(env, name)
         inside_xy = _inside_tray_xy(
             pos,
             tray_pos,
             (0.5 * tray_size[0], 0.5 * tray_size[1]),
-            (0.5 * size[0], 0.5 * size[1]),
+            0.5 * physical_size[:, :2],
             0.0,
         )
-        bottom = pos[:, 2] - 0.5 * size[2]
+        bottom = pos[:, 2] - 0.5 * physical_size[:, 2]
         result |= inside_xy & (bottom >= tray_top - 0.02) & (pos[:, 2] <= tray_top + 0.16)
     return result
 

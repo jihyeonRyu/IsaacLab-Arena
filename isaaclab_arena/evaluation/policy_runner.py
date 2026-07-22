@@ -75,6 +75,23 @@ def rollout_policy(
     pbar = None
     try:
         obs, _ = env.reset()
+
+        # Some articulation assets need a few physics steps after reset before Fabric/RTX
+        # exposes the reset transforms. Environment-specific warm-up bypasses video
+        # wrappers and policy inference so stale frames never enter either stream.
+        base_env = env.unwrapped
+        warmup_steps = int(getattr(base_env.cfg, "policy_warmup_steps", 0))
+        if warmup_steps > 0:
+            warmup_action = getattr(base_env.cfg, "policy_warmup_action", None)
+            actions = torch.zeros(base_env.action_space.shape, device=base_env.device, dtype=torch.float32)
+            if warmup_action is not None:
+                values = torch.as_tensor(warmup_action, device=base_env.device, dtype=torch.float32)
+                actions[..., : values.numel()] = values
+            for _ in range(warmup_steps):
+                obs, _, terminated, truncated, _ = base_env.step(actions)
+                if terminated.any() or truncated.any():
+                    raise RuntimeError("Environment terminated during policy warm-up")
+
         policy.reset()
         policy.set_task_description(env.unwrapped.get_language_instruction())
 

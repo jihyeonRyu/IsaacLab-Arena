@@ -16,7 +16,7 @@ from isaaclab_arena.assets.object import Object
 from isaaclab_arena.assets.object_base import ObjectType
 from isaaclab_arena.assets.object_reference import ObjectReference
 from isaaclab_arena.assets.object_set import RigidObjectSet
-from isaaclab_arena.utils.configclass import make_configclass
+from isaaclab_arena.utils.configclass import combine_configclass_instances, make_configclass
 from isaaclab_arena.utils.phyx_utils import add_contact_report
 from isaaclab_arena.variations.variation_base import VariationBase
 
@@ -86,9 +86,8 @@ class Scene:
             event_cfg_name, event_cfg = asset.get_event_cfg()
             if event_cfg is not None:
                 fields.append((event_cfg_name, type(event_cfg), event_cfg))
-        EventCfg = make_configclass("EventCfg", fields)
-        event_cfg = EventCfg()
-        return event_cfg
+        AssetEventsCfg = make_configclass("AssetEventsCfg", fields)
+        return combine_configclass_instances("EventCfg", AssetEventsCfg(), self.events_cfg)
 
     def get_termination_cfg(self) -> Any:
         return self.termination_cfg
