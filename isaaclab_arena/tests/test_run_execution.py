@@ -63,8 +63,8 @@ def test_build_and_run_splits_episode_budget_without_mutating_config(monkeypatch
     rollout_limits = []
     received_run_cfgs = []
 
-    def make_environment(cfg, render_mode):
-        received_run_cfgs.append(cfg)
+    def make_environment(cfg, render_mode, recorder_output_dir, recorder_filename):
+        received_run_cfgs.append((cfg, recorder_output_dir, recorder_filename))
         return _environment()
 
     monkeypatch.setattr(run_execution, "_build_environment_from_cfg", make_environment)
@@ -85,8 +85,43 @@ def test_build_and_run_splits_episode_budget_without_mutating_config(monkeypatch
     assert result.run_name == "test_run"
     assert result.status is RunStatus.COMPLETED
     assert rollout_limits == [(None, 3), (None, 2)]
-    assert received_run_cfgs == [run, run]
+    assert received_run_cfgs == [
+        (run, str(tmp_path), "dataset_test_run_rebuild0"),
+        (run, str(tmp_path), "dataset_test_run_rebuild1"),
+    ]
     assert run.rollout_limit == RolloutLimitCfg(num_episodes=5)
+
+
+def test_build_environment_routes_recorder_to_run_output(monkeypatch, tmp_path):
+    recorders = SimpleNamespace(
+        dataset_export_dir_path="/tmp/isaaclab/logs",
+        dataset_filename="dataset",
+    )
+    env_cfg = SimpleNamespace(recorders=recorders)
+    expected_environment = object()
+
+    class _Builder:
+        def build_registered(self):
+            return None, env_cfg, {"example": "value"}
+
+        def make_registered(self, received_env_cfg, env_kwargs, render_mode):
+            assert received_env_cfg is env_cfg
+            assert env_kwargs == {"example": "value"}
+            assert render_mode == "rgb_array"
+            return expected_environment
+
+    monkeypatch.setattr(run_execution, "build_arena_builder_from_run_cfg", lambda cfg: _Builder())
+
+    environment = run_execution._build_environment_from_cfg(
+        _run(),
+        "rgb_array",
+        recorder_output_dir=tmp_path,
+        recorder_filename="dataset_test_run_rebuild3",
+    )
+
+    assert environment is expected_environment
+    assert recorders.dataset_export_dir_path == str(tmp_path)
+    assert recorders.dataset_filename == "dataset_test_run_rebuild3"
 
 
 def test_build_and_run_raises_and_closes_resources(monkeypatch, tmp_path):
@@ -97,7 +132,7 @@ def test_build_and_run_raises_and_closes_resources(monkeypatch, tmp_path):
     monkeypatch.setattr(
         run_execution,
         "_build_environment_from_cfg",
-        lambda cfg, render_mode: environment,
+        lambda cfg, render_mode, recorder_output_dir, recorder_filename: environment,
     )
     monkeypatch.setattr(run_execution, "_build_policy_from_cfg", lambda cfg: policy)
     monkeypatch.setattr(run_execution, "wrap_env_for_video", lambda env, video_cfg, steps, episodes: env)
@@ -129,7 +164,7 @@ def test_build_and_run_requires_a_limit_for_an_unbounded_policy(monkeypatch, tmp
     monkeypatch.setattr(
         run_execution,
         "_build_environment_from_cfg",
-        lambda cfg, render_mode: environment,
+        lambda cfg, render_mode, recorder_output_dir, recorder_filename: environment,
     )
     monkeypatch.setattr(run_execution, "_build_policy_from_cfg", lambda cfg: policy)
     monkeypatch.setattr(

@@ -356,8 +356,7 @@ def main(argv: list[str] | None = None) -> int:
 
         for rank, (gpu_id, port, episode_count) in enumerate(zip(gpu_ids, ports, episode_counts, strict=True)):
             worker_output_dir = output_dir / f"rank-{rank:02d}"
-            # Recorder HDF5 paths are cwd-relative. Isolate workers so identically named task datasets never
-            # contend for one file lock.
+            # Keep any relative simulator artifacts isolated in addition to the run-specific recorder paths.
             worker_output_dir.mkdir()
             log_handle = (logs_dir / f"arena-rank-{rank:02d}.log").open("w", encoding="utf-8")
             log_handles.append(log_handle)

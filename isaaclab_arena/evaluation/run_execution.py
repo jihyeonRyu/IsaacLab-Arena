@@ -103,7 +103,12 @@ def build_and_run(
                 video_base_dir=output_dir,
                 camera_name_prefix=f"robot-cam-rebuild{rebuild_index}",
             )
-            env = _build_environment_from_cfg(cfg, rebuild_video_cfg.render_mode)
+            env = _build_environment_from_cfg(
+                cfg,
+                rebuild_video_cfg.render_mode,
+                recorder_output_dir=output_dir,
+                recorder_filename=f"dataset_{cfg.name}_rebuild{rebuild_index}",
+            )
             results_path = os.path.join(output_dir, f"episode_results_rebuild{rebuild_index}.jsonl")
             env.unwrapped.episode_recorder.set_job_name(cfg.name)
             env.unwrapped.episode_recorder.set_output_path(results_path)
@@ -131,12 +136,16 @@ def build_and_run(
 def _build_environment_from_cfg(
     cfg: ArenaRunCfg,
     render_mode: str | None,
+    recorder_output_dir: str | Path | None = None,
+    recorder_filename: str | None = None,
 ) -> gym.Env:
     """Compile and instantiate a run's environment."""
     arena_builder = build_arena_builder_from_run_cfg(cfg)
     _, env_cfg, env_kwargs = arena_builder.build_registered()
     if env_cfg.recorders is not None:
-        env_cfg.recorders.dataset_filename = f"dataset_{cfg.name}"
+        if recorder_output_dir is not None:
+            env_cfg.recorders.dataset_export_dir_path = str(recorder_output_dir)
+        env_cfg.recorders.dataset_filename = recorder_filename or f"dataset_{cfg.name}"
     return arena_builder.make_registered(env_cfg, env_kwargs, render_mode=render_mode)
 
 
