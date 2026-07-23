@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 import math
-import torch
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+import torch
 
 from isaaclab_arena.assets.register import register_environment
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
@@ -56,7 +57,37 @@ BACKGROUND_PALETTE = (
 LIGHT_PALETTE = ((1.0, 0.92, 0.80), (0.82, 0.90, 1.0), (1.0, 0.98, 0.92))
 TRAY_PALETTE = ((0.10, 0.55, 0.22), (0.95, 0.78, 0.18), (0.28, 0.28, 0.30))
 TABLE_PALETTE = ((0.55, 0.47, 0.37), (0.72, 0.72, 0.68), (0.38, 0.42, 0.44))
+CAMERA_FPS = 15.0
+CAMERA_HEIGHT = 256
+CAMERA_WIDTH = 320
+CAMERA_HORIZONTAL_APERTURE = 20.955
+EXTERNAL_CAMERA_FOCAL_LENGTH = 28.0
+WRIST_CAMERA_FOCAL_LENGTH = 10.0
 
+
+def update_blue_tray_wrist_camera(
+    env,
+    env_ids: torch.Tensor | None,
+    camera_name: str,
+    ee_frame_name: str,
+    eye_offset: tuple[float, float, float],
+    target_offset: tuple[float, float, float],
+) -> None:
+    """Match the generator's 15 Hz world-up look-at wrist camera update."""
+    from isaaclab.utils.math import quat_apply
+
+    ee_frame = env.scene[ee_frame_name]
+    indices = slice(None) if env_ids is None else env_ids
+    ee_pos_w = ee_frame.data.target_pos_w[indices, 0]
+    ee_quat_w = ee_frame.data.target_quat_w[indices, 0]
+    count = int(ee_pos_w.shape[0])
+    eye_local = torch.tensor(eye_offset, device=env.device, dtype=torch.float32).expand(count, -1)
+    target_local = torch.tensor(target_offset, device=env.device, dtype=torch.float32).expand(count, -1)
+    eyes = ee_pos_w + quat_apply(ee_quat_w, eye_local)
+    targets = ee_pos_w + quat_apply(ee_quat_w, target_local)
+    camera = env.scene[camera_name]
+    camera.set_world_poses_from_view(eyes, targets, env_ids=env_ids)
+    camera.update(0.0, force_recompute=True)
 
 
 def randomize_blue_tray_cube_scales(
@@ -208,7 +239,7 @@ def reset_blue_tray_room(
     """Create an isolated room per env and randomize it once per episode reset."""
     import omni.usd
     import isaaclab.sim as sim_utils
-    from pxr import Gf, Sdf, UsdGeom, UsdShade, UsdLux
+    from pxr import Gf, UsdGeom, UsdLux
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
@@ -437,7 +468,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                 from isaacsim.core.experimental.utils.app import enable_extension
                 import carb.tokens
                 import omni.replicator.core as rep
-                from pxr import Gf, Sdf, UsdGeom, UsdShade
+                from pxr import Gf, Sdf, UsdShade
 
                 enable_extension("omni.replicator.core")
                 self._rep = rep
@@ -530,7 +561,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                 surface_jitter: float,
             ):
                 import numpy as np
-                from pxr import Gf, Sdf, UsdGeom, UsdShade
+                from pxr import Gf
 
                 if env_ids is None:
                     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
@@ -568,14 +599,14 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
 
             external_camera: CameraCfg = CameraCfg(
                 prim_path="{ENV_REGEX_NS}/external_camera",
-                update_period=1.0 / 15.0,
-                height=256,
-                width=320,
+                update_period=1.0 / CAMERA_FPS,
+                height=CAMERA_HEIGHT,
+                width=CAMERA_WIDTH,
                 data_types=["rgb"],
                 spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=18.0,
+                    focal_length=EXTERNAL_CAMERA_FOCAL_LENGTH,
                     focus_distance=400.0,
-                    horizontal_aperture=20.955,
+                    horizontal_aperture=CAMERA_HORIZONTAL_APERTURE,
                     clipping_range=(0.05, 20.0),
                 ),
                 # eye=(1.3,-1.3,1.0), target=(0.35,0.0,0.25), OpenGL frame.
@@ -587,14 +618,14 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
             )
             wrist_camera: CameraCfg = CameraCfg(
                 prim_path="{ENV_REGEX_NS}/Robot/panda_hand/wrist_camera",
-                update_period=1.0 / 15.0,
-                height=256,
-                width=320,
+                update_period=1.0 / CAMERA_FPS,
+                height=CAMERA_HEIGHT,
+                width=CAMERA_WIDTH,
                 data_types=["rgb"],
                 spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=12.0,
+                    focal_length=WRIST_CAMERA_FOCAL_LENGTH,
                     focus_distance=0.30,
-                    horizontal_aperture=20.955,
+                    horizontal_aperture=CAMERA_HORIZONTAL_APERTURE,
                     clipping_range=(0.02, 5.0),
                 ),
                 # Source-equivalent mount including the synthetic EE frame z-offset (0.1034 m).
@@ -712,6 +743,22 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                 ),
             ),
             (
+                "update_blue_tray_wrist_camera",
+                EventTermCfg,
+                EventTermCfg(
+                    func=update_blue_tray_wrist_camera,
+                    mode="interval",
+                    interval_range_s=(1.0 / CAMERA_FPS, 1.0 / CAMERA_FPS),
+                    is_global_time=True,
+                    params={
+                        "camera_name": "wrist_camera",
+                        "ee_frame_name": "ee_frame",
+                        "eye_offset": (0.10, 0.0, -0.08),
+                        "target_offset": (0.0, 0.0, 0.12),
+                    },
+                ),
+            ),
+            (
                 "reset_blue_tray_layout",
                 EventTermCfg,
                 EventTermCfg(
@@ -816,6 +863,8 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                     ),
                 ]
             )
+        if not cfg.enable_cameras:
+            event_fields = [field for field in event_fields if field[0] != "update_blue_tray_wrist_camera"]
         events_cfg_type = make_configclass("BlueTrayEventsCfg", event_fields)
         scene.events_cfg = events_cfg_type()
 

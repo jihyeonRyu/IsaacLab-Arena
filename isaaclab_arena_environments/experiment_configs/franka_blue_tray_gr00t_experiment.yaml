@@ -20,7 +20,7 @@ runs:
       language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
     policy: &franka_eef_policy
       type: isaaclab_arena_gr00t.policy.franka_eef_remote_policy.FrankaEefRemotePolicy
-      policy_device: cuda:0
+      policy_device: cpu
       remote_host: 127.0.0.1
       remote_port: 5555
       action_horizon: 16
