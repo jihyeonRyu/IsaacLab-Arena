@@ -6,6 +6,8 @@
 # Evaluate each task cardinality separately so success rate is reported for
 # one-, two-, and three-blue-cube episodes instead of hiding the hard cases in
 # one aggregate number.
+# Synthetic generation used seed 7 + episode_index (normally 7..380 for the
+# 374 converted episodes). Keep evaluation RNG streams well outside that range.
 runs:
   franka_blue_tray_1_cube:
     environment:
@@ -16,7 +18,7 @@ runs:
     environment_builder:
       num_envs: 4
       solve_relations: false
-      seed: 101
+      seed: 10007
       language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
     policy: &franka_eef_policy
       type: isaaclab_arena_gr00t.policy.franka_eef_remote_policy.FrankaEefRemotePolicy
@@ -42,7 +44,7 @@ runs:
     environment_builder:
       num_envs: 4
       solve_relations: false
-      seed: 202
+      seed: 20007
       language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
     policy: *franka_eef_policy
     rollout_limit:
@@ -57,7 +59,7 @@ runs:
     environment_builder:
       num_envs: 4
       solve_relations: false
-      seed: 303
+      seed: 30007
       language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
     policy: *franka_eef_policy
     rollout_limit:
