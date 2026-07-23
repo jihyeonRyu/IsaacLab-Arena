@@ -7,6 +7,7 @@ import json
 
 from isaaclab_arena_gr00t.parallel_evaluation import (
     TASK_BASE_SEEDS,
+    _process_environment,
     build_worker_overrides,
     split_episode_budget,
     summarize_results,
@@ -30,6 +31,14 @@ def test_worker_overrides_use_one_env_and_distinct_eval_seeds():
         assert f"runs.{task_name}.rollout_limit.num_episodes=2" in rank_zero_overrides
         assert f"runs.{task_name}.environment_builder.seed={base_seed + 7}" in rank_seven_overrides
         assert f"runs.{task_name}.rollout_limit.num_episodes=1" in rank_seven_overrides
+
+
+def test_process_environment_uses_local_cosmos_model(tmp_path):
+    environment = _process_environment(0, tmp_path / "gr00t", tmp_path / "cosmos")
+
+    assert environment["CUDA_VISIBLE_DEVICES"] == "0"
+    assert environment["GROOT_COSMOS_MODEL_PATH"] == str(tmp_path / "cosmos")
+    assert environment["PYTHONPATH"].split(":")[0] == str(tmp_path / "gr00t")
 
 
 def test_summarize_results_groups_worker_outputs_by_task(tmp_path):

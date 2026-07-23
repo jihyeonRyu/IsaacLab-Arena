@@ -31,6 +31,7 @@ DEFAULT_CHECKPOINT = Path(
 DEFAULT_EXPERIMENT_CONFIG = Path(
     "isaaclab_arena_environments/experiment_configs/franka_blue_tray_gr00t_experiment.yaml"
 )
+DEFAULT_COSMOS_MODEL = Path("/workspace/models/Cosmos-Reason2-2B")
 
 
 def split_episode_budget(total_episodes: int, worker_count: int) -> list[int]:
@@ -100,6 +101,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server-timeout-sec", type=float, default=900.0)
     parser.add_argument("--arena-repo", type=Path, default=arena_repo)
     parser.add_argument("--gr00t-repo", type=Path, default=gr00t_repo)
+    parser.add_argument(
+        "--cosmos-model-path",
+        type=Path,
+        default=Path(os.environ.get("GROOT_COSMOS_MODEL_PATH", DEFAULT_COSMOS_MODEL)),
+    )
     parser.add_argument("--arena-python", type=Path, default=arena_repo / ".venv/bin/python")
     parser.add_argument("--gr00t-python", type=Path, default=gr00t_repo / ".venv/bin/python")
     parser.add_argument("--experiment-config", type=Path, default=arena_repo / DEFAULT_EXPERIMENT_CONFIG)
@@ -136,6 +142,7 @@ def _assert_file_layout(args: argparse.Namespace) -> None:
         args.checkpoint,
         args.arena_python,
         args.gr00t_python,
+        args.cosmos_model_path / "config.json",
         args.experiment_config,
         args.gr00t_repo / "gr00t/eval/run_gr00t_server.py",
         args.arena_repo / "isaaclab_arena/evaluation/experiment_runner.py",
@@ -212,7 +219,7 @@ def _worker_command(
     return command + build_worker_overrides(rank, episode_count)
 
 
-def _process_environment(gpu_id: int, gr00t_repo: Path) -> dict[str, str]:
+def _process_environment(gpu_id: int, gr00t_repo: Path, cosmos_model_path: Path) -> dict[str, str]:
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     environment["PYTHONUNBUFFERED"] = "1"
@@ -220,6 +227,7 @@ def _process_environment(gpu_id: int, gr00t_repo: Path) -> dict[str, str]:
     if environment.get("PYTHONPATH"):
         python_path_entries.append(environment["PYTHONPATH"])
     environment["PYTHONPATH"] = os.pathsep.join(python_path_entries)
+    environment["GROOT_COSMOS_MODEL_PATH"] = str(cosmos_model_path)
     environment.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
     environment.setdefault("ACCEPT_EULA", "Y")
     environment.setdefault("PRIVACY_CONSENT", "Y")
@@ -260,7 +268,7 @@ def _build_aggregate_report(args: argparse.Namespace, output_dir: Path) -> None:
     subprocess.run(
         command,
         cwd=args.arena_repo,
-        env=_process_environment(0, args.gr00t_repo),
+        env=_process_environment(0, args.gr00t_repo, args.cosmos_model_path),
         check=True,
     )
 
@@ -297,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     logs_dir.mkdir()
     manifest = {
         "checkpoint": str(args.checkpoint.resolve()),
+        "cosmos_model_path": str(args.cosmos_model_path.resolve()),
         "gpu_ids": gpu_ids,
         "ports": ports,
         "episodes_per_task": args.episodes_per_task,
@@ -324,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             server = subprocess.Popen(
                 _server_command(args, port),
                 cwd=args.gr00t_repo,
-                env=_process_environment(gpu_id, args.gr00t_repo),
+                env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -338,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = subprocess.run(
                     _wait_command(args, port),
                     cwd=args.gr00t_repo,
-                    env=_process_environment(gpu_id, args.gr00t_repo),
+                    env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path),
                     stdout=wait_log,
                     stderr=subprocess.STDOUT,
                 )
@@ -352,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
             worker = subprocess.Popen(
                 _worker_command(args, rank, port, episode_count, worker_output_dir),
                 cwd=args.arena_repo,
-                env=_process_environment(gpu_id, args.gr00t_repo),
+                env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
