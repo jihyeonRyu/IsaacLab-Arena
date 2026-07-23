@@ -32,6 +32,11 @@ DEFAULT_EXPERIMENT_CONFIG = Path(
     "isaaclab_arena_environments/experiment_configs/franka_blue_tray_gr00t_experiment.yaml"
 )
 DEFAULT_COSMOS_MODEL = Path("/workspace/models/Cosmos-Reason2-2B")
+RTX_KIT_ARGS = (
+    "--/rtx/hydra/progressiveSceneLoad=false "
+    "--/rtx/hydra/geometrySyncLoads=true "
+    "--/rtx-transient/hydra/geometrystreaming/syncLoad=true"
+)
 
 
 def split_episode_budget(total_episodes: int, worker_count: int) -> list[int]:
@@ -43,14 +48,17 @@ def split_episode_budget(total_episodes: int, worker_count: int) -> list[int]:
     return [base + int(rank < remainder) for rank in range(worker_count)]
 
 
-def build_worker_overrides(rank: int, episode_count: int) -> list[str]:
-    """Build Hydra overrides for one single-environment evaluation worker."""
-    overrides = []
-    for task_name, base_seed in TASK_BASE_SEEDS.items():
+def build_worker_overrides(rank: int, episode_count: int, task_name: str | None = None) -> list[str]:
+    """Build Hydra overrides for one single-environment, optionally single-task worker."""
+    if task_name is not None:
+        assert task_name in TASK_BASE_SEEDS, f"Unknown Franka task: {task_name}"
+    selected_tasks = TASK_BASE_SEEDS if task_name is None else {task_name: TASK_BASE_SEEDS[task_name]}
+    overrides = [f"~runs.{name}" for name in TASK_BASE_SEEDS if task_name is not None and name != task_name]
+    for selected_task_name, base_seed in selected_tasks.items():
         overrides.extend([
-            f"runs.{task_name}.environment_builder.num_envs=1",
-            f"runs.{task_name}.environment_builder.seed={base_seed + rank}",
-            f"runs.{task_name}.rollout_limit.num_episodes={episode_count}",
+            f"runs.{selected_task_name}.environment_builder.num_envs=1",
+            f"runs.{selected_task_name}.environment_builder.seed={base_seed + rank}",
+            f"runs.{selected_task_name}.rollout_limit.num_episodes={episode_count}",
         ])
     return overrides
 
@@ -202,6 +210,7 @@ def _worker_command(
     port: int,
     episode_count: int,
     worker_output_dir: Path,
+    task_name: str | None = None,
 ) -> list[str]:
     command = [
         str(args.arena_python),
@@ -209,6 +218,7 @@ def _worker_command(
         "--headless",
         "--enable_cameras",
         "--device=cuda:0",
+        f"--kit_args={RTX_KIT_ARGS}",
         f"--experiment_config={args.experiment_config}",
         f"--experiment_output_directory={worker_output_dir}",
         "--remote_host=127.0.0.1",
@@ -216,7 +226,7 @@ def _worker_command(
     ]
     if args.record_camera_video:
         command.append("--record_camera_video")
-    return command + build_worker_overrides(rank, episode_count)
+    return command + build_worker_overrides(rank, episode_count, task_name)
 
 
 def _process_environment(gpu_id: int, gr00t_repo: Path, cosmos_model_path: Path) -> dict[str, str]:
@@ -289,10 +299,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"output: {output_dir}")
     print(f"workers: {worker_count}; GPUs: {gpu_ids}; episodes/task: {episode_counts}")
     for rank, (gpu_id, port, episode_count) in enumerate(zip(gpu_ids, ports, episode_counts, strict=True)):
-        worker_output_dir = output_dir / f"rank-{rank:02d}"
         print(f"[rank {rank}] GPU {gpu_id}, port {port}, episodes/task {episode_count}")
         print(f"  server: {_command_text(gpu_id, _server_command(args, port))}")
-        print(f"  worker: {_command_text(gpu_id, _worker_command(args, rank, port, episode_count, worker_output_dir))}")
+    for task_name in TASK_BASE_SEEDS:
+        task_slug = task_name.removeprefix("franka_blue_tray_")
+        print(f"[task {task_name}] fresh Arena process per GPU")
+        for rank, (gpu_id, port, episode_count) in enumerate(zip(gpu_ids, ports, episode_counts, strict=True)):
+            worker_output_dir = output_dir / f"rank-{rank:02d}" / f"stage-{task_slug}"
+            worker_command = _worker_command(args, rank, port, episode_count, worker_output_dir, task_name)
+            print(f"  rank {rank}: {_command_text(gpu_id, worker_command)}")
     if args.dry_run:
         return 0
 
@@ -311,6 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         "episodes_per_task": args.episodes_per_task,
         "episode_counts_by_rank": episode_counts,
         "task_base_seeds": TASK_BASE_SEEDS,
+        "fresh_arena_process_per_task": True,
+        "rtx_kit_args": RTX_KIT_ARGS,
         "task_seeds_by_rank": [
             {task_name: base_seed + rank for task_name, base_seed in TASK_BASE_SEEDS.items()}
             for rank in range(worker_count)
@@ -323,7 +340,6 @@ def main(argv: list[str] | None = None) -> int:
 
     processes: list[subprocess.Popen] = []
     server_processes: list[subprocess.Popen] = []
-    worker_processes: list[subprocess.Popen] = []
     log_handles = []
     previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_termination_signal)
     try:
@@ -354,33 +370,41 @@ def main(argv: list[str] | None = None) -> int:
             assert result.returncode == 0, f"GR00T server rank {rank} was not ready; see {wait_log_path}"
             assert server_processes[rank].poll() is None, f"GR00T server rank {rank} exited during startup"
 
-        for rank, (gpu_id, port, episode_count) in enumerate(zip(gpu_ids, ports, episode_counts, strict=True)):
-            worker_output_dir = output_dir / f"rank-{rank:02d}"
-            # Keep any relative simulator artifacts isolated in addition to the run-specific recorder paths.
-            worker_output_dir.mkdir()
-            log_handle = (logs_dir / f"arena-rank-{rank:02d}.log").open("w", encoding="utf-8")
-            log_handles.append(log_handle)
-            worker = subprocess.Popen(
-                _worker_command(args, rank, port, episode_count, worker_output_dir),
-                cwd=worker_output_dir,
-                env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path),
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            processes.append(worker)
-            worker_processes.append(worker)
+        for task_name in TASK_BASE_SEEDS:
+            task_worker_processes = []
+            task_slug = task_name.removeprefix("franka_blue_tray_")
+            print(f"Starting fresh Arena processes for task '{task_name}'", flush=True)
+            for rank, (gpu_id, port, episode_count) in enumerate(zip(gpu_ids, ports, episode_counts, strict=True)):
+                worker_output_dir = output_dir / f"rank-{rank:02d}" / f"stage-{task_slug}"
+                # A fresh Kit process per task prevents Fabric/RTX transforms from leaking across stage rebuilds.
+                worker_output_dir.mkdir(parents=True)
+                log_path = logs_dir / f"arena-{task_slug}-rank-{rank:02d}.log"
+                log_handle = log_path.open("w", encoding="utf-8")
+                log_handles.append(log_handle)
+                worker = subprocess.Popen(
+                    _worker_command(args, rank, port, episode_count, worker_output_dir, task_name),
+                    cwd=worker_output_dir,
+                    env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path),
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                processes.append(worker)
+                task_worker_processes.append(worker)
 
-        while any(worker.poll() is None for worker in worker_processes):
-            for rank, server in enumerate(server_processes):
-                assert server.poll() is None, f"GR00T server rank {rank} exited during evaluation"
-            for rank, worker in enumerate(worker_processes):
-                if worker.poll() not in (None, 0):
-                    raise RuntimeError(f"Arena worker rank {rank} failed; see logs/arena-rank-{rank:02d}.log")
-            time.sleep(2.0)
+            while any(worker.poll() is None for worker in task_worker_processes):
+                for rank, server in enumerate(server_processes):
+                    assert server.poll() is None, f"GR00T server rank {rank} exited during evaluation"
+                for rank, worker in enumerate(task_worker_processes):
+                    if worker.poll() not in (None, 0):
+                        raise RuntimeError(
+                            f"Arena worker rank {rank} failed for {task_name}; "
+                            f"see logs/arena-{task_slug}-rank-{rank:02d}.log"
+                        )
+                time.sleep(2.0)
 
-        failed_workers = [rank for rank, worker in enumerate(worker_processes) if worker.returncode != 0]
-        assert not failed_workers, f"Arena workers failed: {failed_workers}"
+            failed_workers = [rank for rank, worker in enumerate(task_worker_processes) if worker.returncode != 0]
+            assert not failed_workers, f"Arena workers failed for {task_name}: {failed_workers}"
     finally:
         _terminate_processes(processes)
         for log_handle in log_handles:

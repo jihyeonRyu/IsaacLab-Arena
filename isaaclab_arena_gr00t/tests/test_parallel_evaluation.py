@@ -6,8 +6,10 @@
 import json
 
 from isaaclab_arena_gr00t.parallel_evaluation import (
+    RTX_KIT_ARGS,
     TASK_BASE_SEEDS,
     _process_environment,
+    _worker_command,
     build_worker_overrides,
     split_episode_budget,
     summarize_results,
@@ -31,6 +33,32 @@ def test_worker_overrides_use_one_env_and_distinct_eval_seeds():
         assert f"runs.{task_name}.rollout_limit.num_episodes=2" in rank_zero_overrides
         assert f"runs.{task_name}.environment_builder.seed={base_seed + 7}" in rank_seven_overrides
         assert f"runs.{task_name}.rollout_limit.num_episodes=1" in rank_seven_overrides
+
+
+def test_single_task_worker_removes_other_runs_and_syncs_rtx(tmp_path):
+    selected_task = "franka_blue_tray_2_cubes"
+    overrides = build_worker_overrides(rank=3, episode_count=1, task_name=selected_task)
+
+    assert f"runs.{selected_task}.environment_builder.seed=20010" in overrides
+    assert "~runs.franka_blue_tray_1_cube" in overrides
+    assert "~runs.franka_blue_tray_3_cubes" in overrides
+    assert all("franka_blue_tray_1_cube.environment_builder" not in value for value in overrides)
+
+    args = type(
+        "Args",
+        (),
+        {
+            "arena_python": tmp_path / "arena-python",
+            "arena_repo": tmp_path / "arena",
+            "experiment_config": tmp_path / "experiment.yaml",
+            "record_camera_video": True,
+        },
+    )()
+    command = _worker_command(args, 3, 5658, 1, tmp_path / "output", selected_task)
+
+    assert f"--kit_args={RTX_KIT_ARGS}" in command
+    assert "--record_camera_video" in command
+    assert "~runs.franka_blue_tray_1_cube" in command
 
 
 def test_process_environment_uses_local_cosmos_model(tmp_path):

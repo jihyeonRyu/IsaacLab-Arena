@@ -8,10 +8,9 @@
 from __future__ import annotations
 
 import math
+import torch
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-
-import torch
 
 from isaaclab_arena.assets.register import register_environment
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
@@ -98,8 +97,8 @@ def randomize_blue_tray_cube_scales(
     size_range: tuple[float, float],
 ) -> None:
     """Sample independent XYZ sizes per clone before physics parsing and cache them for layout/metrics."""
-    from pxr import Gf, Sdf, UsdGeom, Vt
     import isaaclab.sim as sim_utils
+    from pxr import Gf, Sdf, UsdGeom, Vt
 
     if env.sim.is_playing():
         raise RuntimeError("Cube scale randomization must run in USD mode before simulation starts")
@@ -120,9 +119,7 @@ def randomize_blue_tray_cube_scales(
                 scale_spec = prim_spec.GetAttributeAtPath(prim_path + ".xformOp:scale")
                 has_scale = scale_spec is not None
                 if not has_scale:
-                    scale_spec = Sdf.AttributeSpec(
-                        prim_spec, prim_path + ".xformOp:scale", Sdf.ValueTypeNames.Double3
-                    )
+                    scale_spec = Sdf.AttributeSpec(prim_spec, prim_path + ".xformOp:scale", Sdf.ValueTypeNames.Double3)
                 scale = sampled_sizes[row] / float(base_size)
                 scale_spec.default = Gf.Vec3f(*(float(value) for value in scale.tolist()))
                 if not has_scale:
@@ -131,9 +128,7 @@ def randomize_blue_tray_cube_scales(
                         order_spec = Sdf.AttributeSpec(
                             prim_spec, UsdGeom.Tokens.xformOpOrder, Sdf.ValueTypeNames.TokenArray
                         )
-                    order_spec.default = Vt.TokenArray(
-                        ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
-                    )
+                    order_spec.default = Vt.TokenArray(["xformOp:translate", "xformOp:orient", "xformOp:scale"])
                 all_sizes[env_id] = sampled_sizes[row]
             cache[name] = all_sizes.to(env.device)
     env._blue_tray_cube_sizes = cache
@@ -157,26 +152,22 @@ def reset_blue_tray_layout(
 
     names = (*blue_cube_names, *red_cube_names)
     size_cache = getattr(env, "_blue_tray_cube_sizes", {})
-    poses_by_name = {
-        name: torch.zeros((len(env_ids), 7), device=env.device, dtype=torch.float32) for name in names
-    }
+    poses_by_name = {name: torch.zeros((len(env_ids), 7), device=env.device, dtype=torch.float32) for name in names}
     tray_poses = torch.zeros((len(env_ids), 7), device=env.device, dtype=torch.float32)
 
     for row, env_id_tensor in enumerate(env_ids):
         env_id = int(env_id_tensor.item())
         # Generator bounds: x=(0.40, 0.62), y=(0.04, 0.30), minus tray half extents.
-        tray_x = float(torch.empty(1, device=env.device).uniform_(
-            0.40 + 0.5 * tray_size[0], 0.62 - 0.5 * tray_size[0]
-        ).item())
-        tray_y = float(torch.empty(1, device=env.device).uniform_(
-            0.04 + 0.5 * tray_size[1], 0.30 - 0.5 * tray_size[1]
-        ).item())
+        tray_x = float(
+            torch.empty(1, device=env.device).uniform_(0.40 + 0.5 * tray_size[0], 0.62 - 0.5 * tray_size[0]).item()
+        )
+        tray_y = float(
+            torch.empty(1, device=env.device).uniform_(0.04 + 0.5 * tray_size[1], 0.30 - 0.5 * tray_size[1]).item()
+        )
         tray_poses[row, :3] = torch.tensor((tray_x, tray_y, 0.5 * tray_size[2]), device=env.device)
         tray_poses[row, 6] = 1.0
 
-        occupied: list[tuple[float, float, float, float]] = [
-            (tray_x, tray_y, 0.5 * tray_size[0], 0.5 * tray_size[1])
-        ]
+        occupied: list[tuple[float, float, float, float]] = [(tray_x, tray_y, 0.5 * tray_size[0], 0.5 * tray_size[1])]
         spread_refs: list[tuple[float, float]] = []
         for name, fallback_size in zip(names, cube_sizes, strict=True):
             cached = size_cache.get(name)
@@ -187,13 +178,12 @@ def reset_blue_tray_layout(
             half = 0.5 * max(size[0], size[1])
             candidates: list[tuple[float, float, float]] = []
             for _ in range(512):
-                x = float(torch.empty(1, device=env.device).uniform_(0.33 + half, 0.70 - half).item())
+                x = float(torch.empty(1, device=env.device).uniform_(0.33 + half, 0.62 - half).item())
                 y = float(torch.empty(1, device=env.device).uniform_(-0.30 + half, 0.30 - half).item())
                 if math.hypot(x, y) > 0.66:
                     continue
                 if any(
-                    abs(x - ox) < half + ohx + min_spacing
-                    and abs(y - oy) < half + ohy + min_spacing
+                    abs(x - ox) < half + ohx + min_spacing and abs(y - oy) < half + ohy + min_spacing
                     for ox, oy, ohx, ohy in occupied
                 ):
                     continue
@@ -237,8 +227,8 @@ def reset_blue_tray_room(
     local_light_radius_range: tuple[float, float],
 ) -> None:
     """Create an isolated room per env and randomize it once per episode reset."""
-    import omni.usd
     import isaaclab.sim as sim_utils
+    import omni.usd
     from pxr import Gf, UsdGeom, UsdLux
 
     if env_ids is None:
@@ -255,9 +245,7 @@ def reset_blue_tray_room(
         env_id = int(env_id_tensor.item())
         palette_index = int(torch.randint(len(BACKGROUND_PALETTE), (1,), device=env.device).item())
         background = torch.tensor(BACKGROUND_PALETTE[palette_index], device=env.device)
-        background += torch.empty(3, device=env.device).uniform_(
-            -background_color_jitter, background_color_jitter
-        )
+        background += torch.empty(3, device=env.device).uniform_(-background_color_jitter, background_color_jitter)
         background_color = tuple(float(value) for value in background.clamp_(0.0, 1.0).tolist())
 
         for face_name, face_size, face_position in ROOM_FACES:
@@ -267,9 +255,7 @@ def reset_blue_tray_room(
                 face_cfg = sim_utils.CuboidCfg(
                     size=face_size,
                     semantic_tags=[("class", "background")],
-                    visual_material=sim_utils.PreviewSurfaceCfg(
-                        diffuse_color=background_color, roughness=0.9
-                    ),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=background_color, roughness=0.9),
                 )
                 world_position = tuple(float(value) for value in face_position)
                 face_cfg.func(prim_path, face_cfg, translation=world_position)
@@ -280,9 +266,7 @@ def reset_blue_tray_room(
                 if diffuse and diffuse.IsValid():
                     diffuse.Set(Gf.Vec3f(*background_color))
 
-        active_light_count = int(
-            torch.randint(light_count_low, light_count_high + 1, (1,), device=env.device).item()
-        )
+        active_light_count = int(torch.randint(light_count_low, light_count_high + 1, (1,), device=env.device).item())
         for light_id in range(light_count_high):
             light_path = f"/World/envs/env_{env_id}/vector_light_{light_id}"
             light_prim = stage.GetPrimAtPath(light_path)
@@ -323,7 +307,8 @@ def reset_blue_tray_room(
                 light.GetColorAttr().Set(Gf.Vec3f(*light_color))
                 light.GetRadiusAttr().Set(radius)
                 translate_ops = [
-                    op for op in UsdGeom.Xformable(light_prim).GetOrderedXformOps()
+                    op
+                    for op in UsdGeom.Xformable(light_prim).GetOrderedXformOps()
                     if op.GetOpType() == UsdGeom.XformOp.TypeTranslate
                 ]
                 if translate_ops:
@@ -376,21 +361,21 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
     _legacy_argparse_cfg_type = BlueCubeTrayEnvironmentCfg
 
     def build(self, cfg: BlueCubeTrayEnvironmentCfg) -> IsaacLabArenaEnvironment:
-        from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
-        from isaaclab_arena.scene.scene import Scene
-        from isaaclab_arena.tasks.blue_cube_tray_task import BlueCubeTrayTask
+        import isaaclab.envs.mdp as mdp_isaac_lab
 
         # Environment discovery happens before SimulationApp starts. Keep all
         # Isaac/pxr-dependent imports and classes deferred until build time.
         import isaaclab.sim as sim_utils
-        import isaaclab.envs.mdp as mdp_isaac_lab
-        from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
         from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
         from isaaclab.sensors import CameraCfg
         from isaaclab.utils.configclass import configclass
+        from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 
         from isaaclab_arena.assets.object import Object
         from isaaclab_arena.assets.object_base import ObjectType
+        from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
+        from isaaclab_arena.scene.scene import Scene
+        from isaaclab_arena.tasks.blue_cube_tray_task import BlueCubeTrayTask
         from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
         from isaaclab_arena.utils.cameras import ArenaCameraCfg
         from isaaclab_arena.utils.configclass import make_configclass
@@ -465,9 +450,9 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
 
             def __init__(self, cfg, env):
                 super().__init__(cfg, env)
-                from isaacsim.core.experimental.utils.app import enable_extension
                 import carb.tokens
                 import omni.replicator.core as rep
+                from isaacsim.core.experimental.utils.app import enable_extension
                 from pxr import Gf, Sdf, UsdShade
 
                 enable_extension("omni.replicator.core")
@@ -475,9 +460,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                 env.sim.stage.DefinePrim("/World/Looks", "Scope")
                 self._material_batches: dict[int, dict[str, list]] = {}
                 self._table_shaders: dict[int, object] = {}
-                omni_pbr_mdl = carb.tokens.get_tokens_interface().resolve(
-                    "${kit}/mdl/core/Base/OmniPBR.mdl"
-                )
+                omni_pbr_mdl = carb.tokens.get_tokens_interface().resolve("${kit}/mdl/core/Base/OmniPBR.mdl")
                 blue_names = tuple(cfg.params["blue_names"])
                 red_names = tuple(cfg.params["red_names"])
                 tray_name = cfg.params["tray_name"]
@@ -520,21 +503,13 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                             for index, name in enumerate(names)
                         ]
                     groups["tray"] = [
-                        make_batch(
-                            env_id, "tray", [env.sim.stage.GetPrimAtPath(f"{root}/{tray_name}/geometry")]
-                        )
+                        make_batch(env_id, "tray", [env.sim.stage.GetPrimAtPath(f"{root}/{tray_name}/geometry")])
                     ]
                     table_root = env.sim.stage.GetPrimAtPath(f"{root}/{table_name}")
-                    material = UsdShade.Material.Define(
-                        env.sim.stage, f"/World/Looks/TableMaterial_{env_id}"
-                    )
-                    shader = UsdShade.Shader.Define(
-                        env.sim.stage, f"/World/Looks/TableMaterial_{env_id}/Shader"
-                    )
+                    material = UsdShade.Material.Define(env.sim.stage, f"/World/Looks/TableMaterial_{env_id}")
+                    shader = UsdShade.Shader.Define(env.sim.stage, f"/World/Looks/TableMaterial_{env_id}/Shader")
                     shader.CreateIdAttr("UsdPreviewSurface")
-                    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
-                        Gf.Vec3f(*TABLE_PALETTE[0])
-                    )
+                    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*TABLE_PALETTE[0]))
                     shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.65)
                     material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
                     UsdShade.MaterialBindingAPI.Apply(table_root).Bind(
@@ -561,6 +536,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                 surface_jitter: float,
             ):
                 import numpy as np
+
                 from pxr import Gf
 
                 if env_ids is None:
@@ -591,7 +567,6 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                     self._table_shaders[env_id].GetInput("diffuseColor").Set(
                         Gf.Vec3f(*(float(value) for value in table_rgb))
                     )
-
 
         @configclass
         class BlueTrayFrankaCameraCfg(ArenaCameraCfg):
@@ -639,9 +614,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
         table = self.asset_registry.get_asset_by_name("table")()
         table.usd_path = table.usd_path.replace("/Assets/Isaac/6.0/", "/Assets/Isaac/5.1/")
         table.object_cfg.spawn.usd_path = table.usd_path
-        table.set_initial_pose(
-            Pose(position_xyz=(0.5, 0.0, 0.0), rotation_xyzw=(0.0, 0.0, 0.7071068, 0.7071068))
-        )
+        table.set_initial_pose(Pose(position_xyz=(0.5, 0.0, 0.0), rotation_xyzw=(0.0, 0.0, 0.7071068, 0.7071068)))
         ground = self.asset_registry.get_asset_by_name("ground_plane")()
         ground.set_initial_pose(Pose(position_xyz=(0.0, 0.0, -1.05)))
         dome_light = self.asset_registry.get_asset_by_name("light")()
@@ -706,9 +679,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
         # fixed tabletop joint state, and no reset-time joint noise.
         robot_cfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         # Training episodes explicitly used the Isaac 5.1 asset tree.
-        robot_cfg.spawn.usd_path = robot_cfg.spawn.usd_path.replace(
-            "/Assets/Isaac/6.0/", "/Assets/Isaac/5.1/"
-        )
+        robot_cfg.spawn.usd_path = robot_cfg.spawn.usd_path.replace("/Assets/Isaac/6.0/", "/Assets/Isaac/5.1/")
         robot_cfg.init_state.joint_pos = TABLETOP_FRANKA_JOINT_POS.copy()
         embodiment.scene_config.robot = robot_cfg
         # Disable Arena's index-ordered pose override; the named joint map above
@@ -785,16 +756,15 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                             cfg.background_color_jitter if cfg.randomize_room_appearance else 0.0
                         ),
                         "local_light_count_range": (
-                            tuple(cfg.local_light_count_range)
-                            if cfg.randomize_room_appearance else (3, 3)
+                            tuple(cfg.local_light_count_range) if cfg.randomize_room_appearance else (3, 3)
                         ),
                         "local_light_intensity_range": (
                             tuple(cfg.local_light_intensity_range)
-                            if cfg.randomize_room_appearance else (24000.0, 24000.0)
+                            if cfg.randomize_room_appearance
+                            else (24000.0, 24000.0)
                         ),
                         "local_light_radius_range": (
-                            tuple(cfg.local_light_radius_range)
-                            if cfg.randomize_room_appearance else (0.12, 0.12)
+                            tuple(cfg.local_light_radius_range) if cfg.randomize_room_appearance else (0.12, 0.12)
                         ),
                     },
                 ),
@@ -811,12 +781,9 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                         "tray_name": tray.name,
                         "table_name": table.name,
                         "background_colors": (
-                            BACKGROUND_PALETTE
-                            if cfg.randomize_room_appearance else ((0.10, 0.12, 0.15),)
+                            BACKGROUND_PALETTE if cfg.randomize_room_appearance else ((0.10, 0.12, 0.15),)
                         ),
-                        "background_jitter": (
-                            cfg.background_color_jitter if cfg.randomize_room_appearance else 0.0
-                        ),
+                        "background_jitter": cfg.background_color_jitter if cfg.randomize_room_appearance else 0.0,
                         "blue_color": (0.03, 0.16, 0.95),
                         "red_color": (0.95, 0.04, 0.03),
                         "cube_jitter": 0.04 if cfg.randomize_room_appearance else 0.0,
@@ -828,41 +795,39 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
             ),
         ]
         for name in all_names:
-            event_fields.extend(
-                [
-                    (
-                        f"randomize_{name}_mass",
-                        EventTermCfg,
-                        EventTermCfg(
-                            func=mdp_isaac_lab.randomize_rigid_body_mass,
-                            mode="reset",
-                            params={
-                                "asset_cfg": SceneEntityCfg(name),
-                                "mass_distribution_params": tuple(cfg.cube_mass_range),
-                                "operation": "abs",
-                                "distribution": "uniform",
-                                "recompute_inertia": True,
-                            },
-                        ),
+            event_fields.extend([
+                (
+                    f"randomize_{name}_mass",
+                    EventTermCfg,
+                    EventTermCfg(
+                        func=mdp_isaac_lab.randomize_rigid_body_mass,
+                        mode="reset",
+                        params={
+                            "asset_cfg": SceneEntityCfg(name),
+                            "mass_distribution_params": tuple(cfg.cube_mass_range),
+                            "operation": "abs",
+                            "distribution": "uniform",
+                            "recompute_inertia": True,
+                        },
                     ),
-                    (
-                        f"randomize_{name}_material",
-                        EventTermCfg,
-                        EventTermCfg(
-                            func=mdp_isaac_lab.randomize_rigid_body_material,
-                            mode="reset",
-                            params={
-                                "asset_cfg": SceneEntityCfg(name),
-                                "static_friction_range": tuple(cfg.friction_range),
-                                "dynamic_friction_range": tuple(cfg.friction_range),
-                                "restitution_range": tuple(cfg.restitution_range),
-                                "num_buckets": 64,
-                                "make_consistent": True,
-                            },
-                        ),
+                ),
+                (
+                    f"randomize_{name}_material",
+                    EventTermCfg,
+                    EventTermCfg(
+                        func=mdp_isaac_lab.randomize_rigid_body_material,
+                        mode="reset",
+                        params={
+                            "asset_cfg": SceneEntityCfg(name),
+                            "static_friction_range": tuple(cfg.friction_range),
+                            "dynamic_friction_range": tuple(cfg.friction_range),
+                            "restitution_range": tuple(cfg.restitution_range),
+                            "num_buckets": 64,
+                            "make_consistent": True,
+                        },
                     ),
-                ]
-            )
+                ),
+            ])
         if not cfg.enable_cameras:
             event_fields = [field for field in event_fields if field[0] != "update_blue_tray_wrist_camera"]
         events_cfg_type = make_configclass("BlueTrayEventsCfg", event_fields)
