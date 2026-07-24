@@ -17,7 +17,7 @@ runs:
       num_red_cubes: 2
       cube_size_range: [0.05, 0.05]
     environment_builder:
-      num_envs: 4
+      num_envs: 1
       solve_relations: false
       seed: 10007
       language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
@@ -44,7 +44,7 @@ runs:
       num_red_cubes: 2
       cube_size_range: [0.05, 0.05]
     environment_builder:
-      num_envs: 4
+      num_envs: 1
       solve_relations: false
       seed: 20007
       language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.
@@ -60,7 +60,7 @@ runs:
       num_red_cubes: 2
       cube_size_range: [0.05, 0.05]
     environment_builder:
-      num_envs: 4
+      num_envs: 1
       solve_relations: false
       seed: 30007
       language_instruction: Pick up every blue cube and place it in the green tray. Ignore the red cubes.

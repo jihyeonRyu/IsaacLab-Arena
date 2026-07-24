@@ -266,6 +266,124 @@ def reset_blue_tray_layout(
     tray.write_root_pose_to_sim(tray_poses, env_ids=env_ids)
     tray.write_root_velocity_to_sim(torch.zeros((len(env_ids), 6), device=env.device), env_ids=env_ids)
 
+    reset_pose_cache = getattr(env, "_blue_tray_reset_object_poses", {})
+    for name in names:
+        cached_poses = reset_pose_cache.setdefault(
+            name, torch.zeros((env.num_envs, 7), device=env.device, dtype=torch.float32)
+        )
+        cached_poses[env_ids] = poses_by_name[name]
+    env._blue_tray_reset_object_poses = reset_pose_cache
+
+
+def prepare_blue_tray_policy_episode(env, env_ids: torch.Tensor | None) -> dict:
+    """Reproduce the unrecorded generator pre-roll before policy inference starts."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        env_ids = env_ids.to(device=env.device, dtype=torch.long)
+    if len(env_ids) != env.num_envs:
+        raise RuntimeError("Blue-tray episode preparation requires all vector environments to reset together")
+
+    cfg = env.cfg
+    actions = torch.zeros(env.action_space.shape, device=env.device, dtype=torch.float32)
+    actions[:, 6] = float(cfg.policy_prepare_gripper_command)
+    observation = None
+
+    def step_open(step_count: int) -> None:
+        nonlocal observation
+        for _ in range(step_count):
+            observation, _, terminated, truncated, _ = env.step(actions)
+            if terminated.any() or truncated.any():
+                raise RuntimeError("Environment terminated during unrecorded policy episode preparation")
+
+    # The generator first lets contacts settle, then restores exact upright object poses.
+    step_open(int(cfg.policy_prepare_settle_steps))
+    reset_pose_cache = getattr(env, "_blue_tray_reset_object_poses", None)
+    if not reset_pose_cache:
+        raise RuntimeError("Blue-tray reset poses were not cached before episode preparation")
+    zero_velocity = torch.zeros((len(env_ids), 6), device=env.device, dtype=torch.float32)
+    for name, cached_poses in reset_pose_cache.items():
+        asset = env.scene[name]
+        asset.write_root_pose_to_sim(cached_poses[env_ids], env_ids=env_ids)
+        asset.write_root_velocity_to_sim(zero_velocity, env_ids=env_ids)
+    env.sim.forward()
+    step_open(int(cfg.policy_prepare_stabilize_steps))
+
+    # Translate only: the validated floor-facing gripper orientation is preserved.
+    targets = torch.empty((len(env_ids), 3), device=env.device, dtype=torch.float32)
+    ranges = (cfg.policy_start_ee_x_range, cfg.policy_start_ee_y_range, cfg.policy_start_ee_z_range)
+    for row in range(len(env_ids)):
+        for _ in range(256):
+            candidate = torch.tensor(
+                [float(torch.empty(1, device=env.device).uniform_(*axis_range).item()) for axis_range in ranges],
+                device=env.device,
+                dtype=torch.float32,
+            )
+            radius = float(torch.linalg.vector_norm(candidate[:2]).item())
+            if cfg.policy_start_ee_radius_min <= radius <= cfg.policy_start_ee_radius_max:
+                targets[row] = candidate
+                break
+        else:
+            raise RuntimeError("Could not sample a reachable randomized policy start EEF target")
+
+    ee_frame = env.scene["ee_frame"]
+
+    def current_pose() -> tuple[torch.Tensor, torch.Tensor]:
+        positions = ee_frame.data.target_pos_w[env_ids, 0] - env.scene.env_origins[env_ids]
+        quaternions = ee_frame.data.target_quat_w[env_ids, 0]
+        return positions, quaternions
+
+    def tool_down_tilt_deg(quaternions: torch.Tensor) -> torch.Tensor:
+        # Preserve the generator historical quaternion convention exactly.
+        local_z_world_z = 1.0 - 2.0 * (quaternions[:, 0].square() + quaternions[:, 1].square())
+        down_alignment = (-local_z_world_z).clamp(-1.0, 1.0)
+        return torch.rad2deg(torch.acos(down_alignment))
+
+    _, initial_quaternions = current_pose()
+    if (tool_down_tilt_deg(initial_quaternions) > cfg.policy_start_pose_max_tilt_deg).any():
+        raise RuntimeError("Initial tool pose exceeds the generator floor-facing tilt limit")
+
+    reached = torch.zeros(len(env_ids), device=env.device, dtype=torch.bool)
+    for _ in range(int(cfg.policy_start_pose_timeout_steps)):
+        positions, quaternions = current_pose()
+        if (tool_down_tilt_deg(quaternions) > cfg.policy_start_pose_max_tilt_deg).any():
+            raise RuntimeError("Tool pose exceeded the generator floor-facing tilt limit during pre-roll")
+        delta = targets - positions
+        distance = torch.linalg.vector_norm(delta, dim=-1)
+        reached = distance <= float(cfg.policy_start_pose_tolerance)
+        if reached.all():
+            break
+        step = delta.clone()
+        moving = torch.logical_not(reached)
+        scale = (float(cfg.policy_start_pose_step) / distance[moving].clamp_min(1.0e-8)).clamp_max(1.0)
+        step[moving] *= scale[:, None]
+        step[reached] = 0.0
+        move_actions = actions.clone()
+        move_actions[env_ids, :3] = step
+        observation, _, terminated, truncated, _ = env.step(move_actions)
+        if terminated.any() or truncated.any():
+            raise RuntimeError("Environment terminated while preparing randomized policy start pose")
+
+    step_open(int(cfg.policy_start_pose_hold_steps))
+    positions, final_quaternions = current_pose()
+    final_error = torch.linalg.vector_norm(targets - positions, dim=-1)
+    final_tilt = tool_down_tilt_deg(final_quaternions)
+    if (final_tilt > cfg.policy_start_pose_max_tilt_deg).any():
+        raise RuntimeError("Final tool pose exceeds the generator floor-facing tilt limit")
+    print(
+        "[POLICY-START] "
+        f"targets={targets.detach().cpu().tolist()} actual={positions.detach().cpu().tolist()} "
+        f"error={final_error.detach().cpu().tolist()} tilt={final_tilt.detach().cpu().tolist()}"
+    )
+
+    # Preparation is outside the evaluated episode, just like generation before recording.
+    env.episode_length_buf[env_ids] = 0
+    env.sim.render()
+    update_blue_tray_wrist_camera(
+        env, env_ids, "wrist_camera", "ee_frame", (0.10, 0.0, -0.08), (0.0, 0.0, 0.12)
+    )
+    env.scene["external_camera"].update(0.0, force_recompute=True)
+    return env.observation_manager.compute()
 
 
 def reset_blue_tray_room(
@@ -394,6 +512,19 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
     local_light_count_range: list[int] = field(default_factory=lambda: [3, 3])
     local_light_intensity_range: list[float] = field(default_factory=lambda: [8000.0, 65000.0])
     local_light_radius_range: list[float] = field(default_factory=lambda: [0.05, 0.20])
+    policy_prepare_settle_steps: int = 72
+    policy_prepare_stabilize_steps: int = 14
+    policy_prepare_gripper_command: float = 1.0
+    policy_start_ee_x_range: tuple[float, float] = (0.36, 0.70)
+    policy_start_ee_y_range: tuple[float, float] = (-0.34, 0.34)
+    policy_start_ee_z_range: tuple[float, float] = (0.25, 0.55)
+    policy_start_ee_radius_min: float = 0.40
+    policy_start_ee_radius_max: float = 0.72
+    policy_start_pose_step: float = 0.03
+    policy_start_pose_tolerance: float = 0.012
+    policy_start_pose_timeout_steps: int = 480
+    policy_start_pose_hold_steps: int = 12
+    policy_start_pose_max_tilt_deg: float = 60.0
 
     def __post_init__(self) -> None:
         assert 1 <= self.num_blue_cubes <= 3
@@ -414,6 +545,13 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
         assert 0.0 < self.local_light_intensity_range[0] <= self.local_light_intensity_range[1]
         assert len(self.local_light_radius_range) == 2
         assert 0.0 < self.local_light_radius_range[0] <= self.local_light_radius_range[1]
+        assert self.policy_prepare_settle_steps >= 0 and self.policy_prepare_stabilize_steps >= 0
+        assert len(self.policy_start_ee_x_range) == len(self.policy_start_ee_y_range) == 2
+        assert len(self.policy_start_ee_z_range) == 2
+        assert 0.0 < self.policy_start_ee_radius_min <= self.policy_start_ee_radius_max
+        assert self.policy_start_pose_step > 0.0 and self.policy_start_pose_tolerance > 0.0
+        assert self.policy_start_pose_timeout_steps > 0 and self.policy_start_pose_hold_steps >= 0
+        assert 0.0 < self.policy_start_pose_max_tilt_deg <= 75.0
 
 
 @register_environment
@@ -507,6 +645,70 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
 
             def get_corners(self, pos: torch.Tensor) -> torch.Tensor:
                 return self.get_bounding_box().get_corners_at(pos)
+
+        class RandomizeCubePhysicsOnce(ManagerTermBase):
+            """Sample per-worker cube physics once, matching vector generation."""
+
+            def __init__(self, cfg, env):
+                super().__init__(cfg, env)
+                params = cfg.params
+                asset_cfg = params["asset_cfg"]
+                mass_cfg = EventTermCfg(
+                    func=mdp_isaac_lab.randomize_rigid_body_mass,
+                    mode="reset",
+                    params={
+                        "asset_cfg": asset_cfg,
+                        "mass_distribution_params": params["mass_distribution_params"],
+                        "operation": "abs",
+                        "distribution": "uniform",
+                        "recompute_inertia": True,
+                    },
+                )
+                material_cfg = EventTermCfg(
+                    func=mdp_isaac_lab.randomize_rigid_body_material,
+                    mode="reset",
+                    params={
+                        "asset_cfg": asset_cfg,
+                        "static_friction_range": params["static_friction_range"],
+                        "dynamic_friction_range": params["dynamic_friction_range"],
+                        "restitution_range": params["restitution_range"],
+                        "num_buckets": 64,
+                        "make_consistent": True,
+                    },
+                )
+                self._mass_term = mdp_isaac_lab.randomize_rigid_body_mass(mass_cfg, env)
+                self._material_term = mdp_isaac_lab.randomize_rigid_body_material(material_cfg, env)
+                self._initialized = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+            def __call__(
+                self,
+                env,
+                env_ids,
+                asset_cfg,
+                mass_distribution_params,
+                static_friction_range,
+                dynamic_friction_range,
+                restitution_range,
+            ):
+                if env_ids is None:
+                    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+                pending = env_ids[torch.logical_not(self._initialized[env_ids])]
+                if len(pending) == 0:
+                    return
+                self._mass_term(
+                    env, pending, asset_cfg, mass_distribution_params, "abs", "uniform", True
+                )
+                self._material_term(
+                    env,
+                    pending,
+                    static_friction_range,
+                    dynamic_friction_range,
+                    restitution_range,
+                    64,
+                    asset_cfg,
+                    True,
+                )
+                self._initialized[pending] = True
 
         class RandomizeSceneMaterials(ManagerTermBase):
             """Keep room/object colors fixed within an episode and resample them on reset."""
@@ -687,6 +889,8 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
         ground = self.asset_registry.get_asset_by_name("ground_plane")()
         ground.set_initial_pose(Pose(position_xyz=(0.0, 0.0, -1.05)))
         dome_light = self.asset_registry.get_asset_by_name("light")()
+        dome_light.spawner_cfg.visible_in_primary_ray = False
+        dome_light.set_color((0.86, 0.86, 0.86))
         dome_light.set_intensity(900.0)
 
         size = (cfg.cube_size, cfg.cube_size, cfg.cube_size)
@@ -871,39 +1075,23 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
             ),
         ]
         for name in all_names:
-            event_fields.extend([
+            event_fields.append(
                 (
-                    f"randomize_{name}_mass",
+                    f"randomize_{name}_physics_once",
                     EventTermCfg,
                     EventTermCfg(
-                        func=mdp_isaac_lab.randomize_rigid_body_mass,
+                        func=RandomizeCubePhysicsOnce,
                         mode="reset",
                         params={
                             "asset_cfg": SceneEntityCfg(name),
                             "mass_distribution_params": tuple(cfg.cube_mass_range),
-                            "operation": "abs",
-                            "distribution": "uniform",
-                            "recompute_inertia": True,
-                        },
-                    ),
-                ),
-                (
-                    f"randomize_{name}_material",
-                    EventTermCfg,
-                    EventTermCfg(
-                        func=mdp_isaac_lab.randomize_rigid_body_material,
-                        mode="reset",
-                        params={
-                            "asset_cfg": SceneEntityCfg(name),
                             "static_friction_range": tuple(cfg.friction_range),
                             "dynamic_friction_range": tuple(cfg.friction_range),
                             "restitution_range": tuple(cfg.restitution_range),
-                            "num_buckets": 64,
-                            "make_consistent": True,
                         },
                     ),
-                ),
-            ])
+                )
+            )
         if not cfg.enable_cameras:
             event_fields = [field for field in event_fields if field[0] != "update_blue_tray_wrist_camera"]
         events_cfg_type = make_configclass("BlueTrayEventsCfg", event_fields)
@@ -923,10 +1111,22 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
             env_cfg.sim.dt = 1.0 / 120.0
             env_cfg.decimation = 2
             env_cfg.sim.render_interval = 8
-            # Flush Fabric/RTX sensor transforms after reset before policy observation.
+            # Match the generator before recording; task actions still come only from GR00T.
             env_cfg.num_rerenders_on_reset = 1
-            env_cfg.policy_warmup_steps = 4
-            env_cfg.policy_warmup_action = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            env_cfg.policy_episode_prepare_callback = prepare_blue_tray_policy_episode
+            env_cfg.policy_prepare_settle_steps = cfg.policy_prepare_settle_steps
+            env_cfg.policy_prepare_stabilize_steps = cfg.policy_prepare_stabilize_steps
+            env_cfg.policy_prepare_gripper_command = cfg.policy_prepare_gripper_command
+            env_cfg.policy_start_ee_x_range = tuple(cfg.policy_start_ee_x_range)
+            env_cfg.policy_start_ee_y_range = tuple(cfg.policy_start_ee_y_range)
+            env_cfg.policy_start_ee_z_range = tuple(cfg.policy_start_ee_z_range)
+            env_cfg.policy_start_ee_radius_min = cfg.policy_start_ee_radius_min
+            env_cfg.policy_start_ee_radius_max = cfg.policy_start_ee_radius_max
+            env_cfg.policy_start_pose_step = cfg.policy_start_pose_step
+            env_cfg.policy_start_pose_tolerance = cfg.policy_start_pose_tolerance
+            env_cfg.policy_start_pose_timeout_steps = cfg.policy_start_pose_timeout_steps
+            env_cfg.policy_start_pose_hold_steps = cfg.policy_start_pose_hold_steps
+            env_cfg.policy_start_pose_max_tilt_deg = cfg.policy_start_pose_max_tilt_deg
             return env_cfg
 
         return IsaacLabArenaEnvironment(

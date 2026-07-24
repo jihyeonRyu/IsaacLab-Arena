@@ -26,12 +26,13 @@ TASK_BASE_SEEDS = {
 """Evaluation seeds chosen outside the synthetic-data seed range."""
 
 DEFAULT_CHECKPOINT = Path(
-    "/workspace/Isaac-GR00T/outputs/franka-groot-sft/franka-blue-cube-sft-crop098-aug-v2/checkpoint-10000"
+    "/workspace/Isaac-GR00T/outputs/franka-groot-sft/franka-blue-cube-sft-fixedtray-recovery-v3/checkpoint-10000"
 )
 DEFAULT_EXPERIMENT_CONFIG = Path(
     "isaaclab_arena_environments/experiment_configs/franka_blue_tray_gr00t_experiment.yaml"
 )
 DEFAULT_COSMOS_MODEL = Path("/workspace/models/Cosmos-Reason2-2B")
+DEFAULT_ARENA_PYTHON = Path("/workspace/env_isaaclab/bin/python")
 RTX_KIT_ARGS = (
     "--/rtx/hydra/progressiveSceneLoad=false "
     "--/rtx/hydra/geometrySyncLoads=true "
@@ -58,6 +59,7 @@ def build_worker_overrides(rank: int, episode_count: int, task_name: str | None 
         overrides.extend([
             f"runs.{selected_task_name}.environment_builder.num_envs=1",
             f"runs.{selected_task_name}.environment_builder.seed={base_seed + rank}",
+            f"runs.{selected_task_name}.policy.sensor_seed={base_seed + rank}",
             f"runs.{selected_task_name}.rollout_limit.num_episodes={episode_count}",
         ])
     return overrides
@@ -120,7 +122,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(os.environ.get("GROOT_COSMOS_MODEL_PATH", DEFAULT_COSMOS_MODEL)),
     )
-    parser.add_argument("--arena-python", type=Path, default=arena_repo / ".venv/bin/python")
+    parser.add_argument(
+        "--arena-python",
+        type=Path,
+        default=Path(os.environ.get("ARENA_PYTHON", DEFAULT_ARENA_PYTHON)),
+    )
     parser.add_argument("--gr00t-python", type=Path, default=gr00t_repo / ".venv/bin/python")
     parser.add_argument("--experiment-config", type=Path, default=arena_repo / DEFAULT_EXPERIMENT_CONFIG)
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -184,6 +190,20 @@ def _assert_gpus_available(gpu_ids: list[int]) -> None:
     assert not missing_gpu_ids, f"Requested GPUs are not visible to nvidia-smi: {sorted(missing_gpu_ids)}"
 
 
+def _python_package_versions(python: Path, distributions: tuple[str, ...]) -> dict[str, str]:
+    script = (
+        "import importlib.metadata as m, json, sys; "
+        "print(json.dumps({name: m.version(name) for name in sys.argv[1:]}))"
+    )
+    result = subprocess.run(
+        [str(python), "-c", script, *distributions],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
 def _command_text(gpu_id: int, command: list[str]) -> str:
     return f"CUDA_VISIBLE_DEVICES={gpu_id} {shlex.join(command)}"
 
@@ -235,11 +255,18 @@ def _worker_command(
     return command + build_worker_overrides(rank, episode_count, task_name)
 
 
-def _process_environment(gpu_id: int, gr00t_repo: Path, cosmos_model_path: Path) -> dict[str, str]:
+def _process_environment(
+    gpu_id: int,
+    gr00t_repo: Path,
+    cosmos_model_path: Path,
+    arena_repo: Path | None = None,
+) -> dict[str, str]:
     environment = os.environ.copy()
     environment["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     environment["PYTHONUNBUFFERED"] = "1"
     python_path_entries = [str(gr00t_repo)]
+    if arena_repo is not None:
+        python_path_entries.insert(0, str(arena_repo))
     if environment.get("PYTHONPATH"):
         python_path_entries.append(environment["PYTHONPATH"])
     environment["PYTHONPATH"] = os.pathsep.join(python_path_entries)
@@ -284,7 +311,7 @@ def _build_aggregate_report(args: argparse.Namespace, output_dir: Path) -> None:
     subprocess.run(
         command,
         cwd=args.arena_repo,
-        env=_process_environment(0, args.gr00t_repo, args.cosmos_model_path),
+        env=_process_environment(0, args.gr00t_repo, args.cosmos_model_path, args.arena_repo),
         check=True,
     )
 
@@ -327,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
     logs_dir.mkdir()
     manifest = {
         "checkpoint": str(args.checkpoint.resolve()),
+        "arena_python": str(args.arena_python),
+        "arena_package_versions": _python_package_versions(args.arena_python, ("isaacsim", "isaaclab")),
         "cosmos_model_path": str(args.cosmos_model_path.resolve()),
         "gpu_ids": gpu_ids,
         "ports": ports,
@@ -357,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
             server = subprocess.Popen(
                 _server_command(args, port),
                 cwd=args.gr00t_repo,
-                env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path),
+                env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path, args.arena_repo),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -371,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = subprocess.run(
                     _wait_command(args, port),
                     cwd=args.gr00t_repo,
-                    env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path),
+                    env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path, args.arena_repo),
                     stdout=wait_log,
                     stderr=subprocess.STDOUT,
                 )
@@ -392,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
                 worker = subprocess.Popen(
                     _worker_command(args, rank, port, episode_count, worker_output_dir, task_name),
                     cwd=worker_output_dir,
-                    env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path),
+                    env=_process_environment(gpu_id, args.gr00t_repo, args.cosmos_model_path, args.arena_repo),
                     stdout=log_handle,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,

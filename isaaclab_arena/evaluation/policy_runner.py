@@ -63,6 +63,28 @@ def is_distributed(args_cli: argparse.Namespace) -> bool:
     )
 
 
+def _prepare_policy_episode(base_env, observation, env_ids: torch.Tensor | None = None):
+    """Run an environment unrecorded reset preparation before policy inference."""
+    callback = getattr(base_env.cfg, "policy_episode_prepare_callback", None)
+    if callback is not None:
+        prepared_observation = callback(base_env, env_ids)
+        return observation if prepared_observation is None else prepared_observation
+
+    warmup_steps = int(getattr(base_env.cfg, "policy_warmup_steps", 0))
+    if warmup_steps <= 0:
+        return observation
+    warmup_action = getattr(base_env.cfg, "policy_warmup_action", None)
+    actions = torch.zeros(base_env.action_space.shape, device=base_env.device, dtype=torch.float32)
+    if warmup_action is not None:
+        values = torch.as_tensor(warmup_action, device=base_env.device, dtype=torch.float32)
+        actions[..., : values.numel()] = values
+    for _ in range(warmup_steps):
+        observation, _, terminated, truncated, _ = base_env.step(actions)
+        if terminated.any() or truncated.any():
+            raise RuntimeError("Environment terminated during policy warm-up")
+    return observation
+
+
 def rollout_policy(
     env,
     policy: PolicyBase,
@@ -76,21 +98,8 @@ def rollout_policy(
     try:
         obs, _ = env.reset()
 
-        # Some articulation assets need a few physics steps after reset before Fabric/RTX
-        # exposes the reset transforms. Environment-specific warm-up bypasses video
-        # wrappers and policy inference so stale frames never enter either stream.
         base_env = env.unwrapped
-        warmup_steps = int(getattr(base_env.cfg, "policy_warmup_steps", 0))
-        if warmup_steps > 0:
-            warmup_action = getattr(base_env.cfg, "policy_warmup_action", None)
-            actions = torch.zeros(base_env.action_space.shape, device=base_env.device, dtype=torch.float32)
-            if warmup_action is not None:
-                values = torch.as_tensor(warmup_action, device=base_env.device, dtype=torch.float32)
-                actions[..., : values.numel()] = values
-            for _ in range(warmup_steps):
-                obs, _, terminated, truncated, _ = base_env.step(actions)
-                if terminated.any() or truncated.any():
-                    raise RuntimeError("Environment terminated during policy warm-up")
+        obs = _prepare_policy_episode(base_env, obs)
 
         policy.reset()
         policy.set_task_description(env.unwrapped.get_language_instruction())
@@ -130,6 +139,7 @@ def rollout_policy(
                         pbar.update(completed_episodes)
                         if num_episodes_completed >= num_episodes:
                             break
+                    obs = _prepare_policy_episode(base_env, obs, env_ids)
                 # Break if number of steps is reached
                 num_steps_completed += 1
                 if num_steps is not None:

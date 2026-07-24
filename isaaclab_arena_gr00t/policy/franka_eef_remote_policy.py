@@ -73,11 +73,19 @@ class FrankaEefRemotePolicyCfg(PolicyCfg):
     language_key: str = "annotation.human.action.task_description"
     max_translation_action: float = 0.0375
     max_rotation_action: float = 0.0666667
+    sensor_seed: int = 0
+    rgb_brightness_range: tuple[float, float] = (0.95, 1.20)
+    rgb_noise_std: float = 3.0
 
     def __post_init__(self) -> None:
         assert self.num_envs > 0
         assert 0 < self.action_chunk_length <= self.action_horizon
         assert self.control_hz >= self.policy_hz and self.control_hz % self.policy_hz == 0
+        assert (
+            len(self.rgb_brightness_range) == 2
+            and 0.0 < self.rgb_brightness_range[0] <= self.rgb_brightness_range[1]
+        )
+        assert self.rgb_noise_std >= 0.0
 
 
 @register_policy
@@ -107,7 +115,17 @@ class FrankaEefRemotePolicy(PolicyBase[FrankaEefRemotePolicyCfg]):
             (config.num_envs,), config.action_chunk_length, dtype=torch.long, device=self.device
         )
         self._control_substep = torch.zeros(config.num_envs, dtype=torch.long, device=self.device)
+        self._sensor_rng = np.random.default_rng(config.sensor_seed)
+        self._rgb_brightness_gain = np.ones(config.num_envs, dtype=np.float32)
 
+    def _augment_rgb(self, rgb: np.ndarray) -> np.ndarray:
+        """Apply the same episode exposure and per-frame RGB noise used by generation."""
+        if rgb.shape[0] != self.config.num_envs:
+            raise ValueError(f"Expected {self.config.num_envs} camera batches, got {rgb.shape[0]}")
+        augmented = rgb.astype(np.float32) * self._rgb_brightness_gain[:, None, None, None]
+        if self.config.rgb_noise_std > 0.0:
+            augmented += self._sensor_rng.normal(0.0, self.config.rgb_noise_std, augmented.shape)
+        return np.clip(augmented, 0.0, 255.0).astype(np.uint8)
 
     def set_task_description(self, task_description: str | None) -> str:
         if not task_description:
@@ -122,6 +140,8 @@ class FrankaEefRemotePolicy(PolicyBase[FrankaEefRemotePolicyCfg]):
         wrist = _to_numpy(camera_obs[cfg.wrist_camera_name])
         if external.ndim != 4 or wrist.ndim != 4:
             raise ValueError(f"Expected batched NHWC RGB; got external={external.shape}, wrist={wrist.shape}")
+        external = self._augment_rgb(external)
+        wrist = self._augment_rgb(wrist)
 
         policy_obs = observation["policy"]
         eef_pos = policy_obs["eef_pos"].to(device=self.device, dtype=torch.float32)
@@ -203,6 +223,9 @@ class FrankaEefRemotePolicy(PolicyBase[FrankaEefRemotePolicyCfg]):
         self._chunk[env_ids] = 0.0
         self._policy_index[env_ids] = self.config.action_chunk_length
         self._control_substep[env_ids] = 0
+        env_ids_cpu = env_ids.detach().cpu().numpy()
+        low, high = self.config.rgb_brightness_range
+        self._rgb_brightness_gain[env_ids_cpu] = self._sensor_rng.uniform(low, high, size=len(env_ids_cpu))
         if self._client is not None:
             self._client.reset()
 

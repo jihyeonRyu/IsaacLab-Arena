@@ -26,6 +26,7 @@ import pytest
 
 from isaaclab_arena.assets.registries import PolicyRegistry
 from isaaclab_arena.policy import action_scheduling
+from isaaclab_arena_gr00t.policy import franka_eef_remote_policy as franka_policy
 from isaaclab_arena_gr00t.policy import gr00t_remote_closedloop_policy as gr00t_policy
 from isaaclab_arena_gr00t.tests.utils.constants import TestConstants as Gr00tTestConstants
 
@@ -276,3 +277,65 @@ def test_synced_batch_holds_joint_position_for_env_after_partial_reset(
     assert clients[0].get_action_calls == 1
     expected_hold = policy._extract_hold_action(synthetic_observation)
     torch.testing.assert_close(action[1], expected_hold[1])
+
+
+class _FakeFrankaPolicyClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def ping(self):
+        return True
+
+    def reset(self):
+        pass
+
+
+def _make_franka_policy(monkeypatch, *, sensor_seed=7, brightness=(1.1, 1.1), noise=0.0):
+    monkeypatch.setattr(franka_policy, "Gr00tPolicyClient", _FakeFrankaPolicyClient)
+    policy = franka_policy.FrankaEefRemotePolicy(
+        franka_policy.FrankaEefRemotePolicyCfg(
+            num_envs=NUM_ENVS,
+            policy_device="cpu",
+            action_horizon=4,
+            action_chunk_length=4,
+            sensor_seed=sensor_seed,
+            rgb_brightness_range=brightness,
+            rgb_noise_std=noise,
+        )
+    )
+    policy.reset()
+    policy.set_task_description("place every blue cube in the green tray")
+    return policy
+
+
+def _make_franka_observation():
+    rgb = torch.full((NUM_ENVS, 2, 3, 3), 100, dtype=torch.uint8)
+    return {
+        "camera_obs": {"external_camera_rgb": rgb, "wrist_camera_rgb": rgb.clone()},
+        "policy": {
+            "eef_pos": torch.zeros((NUM_ENVS, 3)),
+            "eef_quat": torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(NUM_ENVS, 1),
+            "gripper_pos": torch.tensor([[0.04, -0.04]]).repeat(NUM_ENVS, 1),
+        },
+    }
+
+
+def test_franka_rgb_uses_episode_brightness_gain(monkeypatch):
+    policy = _make_franka_policy(monkeypatch)
+
+    request = policy._build_request(_make_franka_observation())
+
+    assert np.all(request["video"]["external"] == 110)
+    assert np.all(request["video"]["wrist"] == 110)
+    assert request["video"]["external"].dtype == np.uint8
+
+
+def test_franka_rgb_noise_is_seeded_and_independent_per_camera(monkeypatch):
+    first = _make_franka_policy(monkeypatch, sensor_seed=19, brightness=(1.0, 1.0), noise=3.0)
+    first_request = first._build_request(_make_franka_observation())
+    second = _make_franka_policy(monkeypatch, sensor_seed=19, brightness=(1.0, 1.0), noise=3.0)
+    second_request = second._build_request(_make_franka_observation())
+
+    np.testing.assert_array_equal(first_request["video"]["external"], second_request["video"]["external"])
+    np.testing.assert_array_equal(first_request["video"]["wrist"], second_request["video"]["wrist"])
+    assert not np.array_equal(first_request["video"]["external"], first_request["video"]["wrist"])

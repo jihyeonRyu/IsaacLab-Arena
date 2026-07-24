@@ -30,8 +30,10 @@ def test_worker_overrides_use_one_env_and_distinct_eval_seeds():
     for task_name, base_seed in TASK_BASE_SEEDS.items():
         assert f"runs.{task_name}.environment_builder.num_envs=1" in rank_zero_overrides
         assert f"runs.{task_name}.environment_builder.seed={base_seed}" in rank_zero_overrides
+        assert f"runs.{task_name}.policy.sensor_seed={base_seed}" in rank_zero_overrides
         assert f"runs.{task_name}.rollout_limit.num_episodes=2" in rank_zero_overrides
         assert f"runs.{task_name}.environment_builder.seed={base_seed + 7}" in rank_seven_overrides
+        assert f"runs.{task_name}.policy.sensor_seed={base_seed + 7}" in rank_seven_overrides
         assert f"runs.{task_name}.rollout_limit.num_episodes=1" in rank_seven_overrides
 
 
@@ -62,11 +64,11 @@ def test_single_task_worker_removes_other_runs_and_syncs_rtx(tmp_path):
 
 
 def test_process_environment_uses_local_cosmos_model(tmp_path):
-    environment = _process_environment(0, tmp_path / "gr00t", tmp_path / "cosmos")
+    environment = _process_environment(0, tmp_path / "gr00t", tmp_path / "cosmos", tmp_path / "arena")
 
     assert environment["CUDA_VISIBLE_DEVICES"] == "0"
     assert environment["GROOT_COSMOS_MODEL_PATH"] == str(tmp_path / "cosmos")
-    assert environment["PYTHONPATH"].split(":")[0] == str(tmp_path / "gr00t")
+    assert environment["PYTHONPATH"].split(":")[:2] == [str(tmp_path / "arena"), str(tmp_path / "gr00t")]
 
 
 def test_summarize_results_groups_worker_outputs_by_task(tmp_path):
