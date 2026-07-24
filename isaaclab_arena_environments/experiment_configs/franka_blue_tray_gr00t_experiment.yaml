@@ -6,8 +6,8 @@
 # Evaluate each task cardinality separately so success rate is reported for
 # one-, two-, and three-blue-cube episodes instead of hiding the hard cases in
 # one aggregate number.
-# Synthetic generation used seed 7 + episode_index (normally 7..380 for the
-# 374 converted episodes). Keep evaluation RNG streams well outside that range.
+# Synthetic generation uses seed 50007 + episode_index (50007..50606 for the
+# 600-attempt run). Keep evaluation RNG streams outside that range.
 runs:
   franka_blue_tray_1_cube:
     environment:
@@ -15,7 +15,7 @@ runs:
       enable_cameras: true
       num_blue_cubes: 1
       num_red_cubes: 2
-      cube_size_range: [0.05, 0.05]
+      cube_size_range: [0.05, 0.065]
     environment_builder:
       num_envs: 4
       solve_relations: false
@@ -42,7 +42,7 @@ runs:
       enable_cameras: true
       num_blue_cubes: 2
       num_red_cubes: 2
-      cube_size_range: [0.05, 0.05]
+      cube_size_range: [0.05, 0.065]
     environment_builder:
       num_envs: 4
       solve_relations: false
@@ -58,7 +58,7 @@ runs:
       enable_cameras: true
       num_blue_cubes: 3
       num_red_cubes: 2
-      cube_size_range: [0.05, 0.05]
+      cube_size_range: [0.05, 0.065]
     environment_builder:
       num_envs: 4
       solve_relations: false

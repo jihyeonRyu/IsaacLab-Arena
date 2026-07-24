@@ -62,6 +62,9 @@ CAMERA_WIDTH = 320
 CAMERA_HORIZONTAL_APERTURE = 20.955
 EXTERNAL_CAMERA_FOCAL_LENGTH = 28.0
 WRIST_CAMERA_FOCAL_LENGTH = 10.0
+WORKSPACE_X_BOUNDS = (0.33, 0.70)
+WORKSPACE_Y_BOUNDS = (-0.34, 0.34)
+WORKSPACE_RADIUS_MAX = 0.68
 
 
 def update_blue_tray_wrist_camera(
@@ -142,9 +145,13 @@ def reset_blue_tray_layout(
     cube_sizes: tuple[tuple[float, float, float], ...],
     tray_name: str,
     tray_size: tuple[float, float, float],
+    tray_z: float,
     min_spacing: float,
+    workspace_x_bounds: tuple[float, float],
+    workspace_y_bounds: tuple[float, float],
+    workspace_radius_max: float,
 ) -> None:
-    """Match the generator workspace, reach limit, collision margins, and spread sampling."""
+    """Match generator workspace, fixed-tray slots, reach limit, and spread sampling."""
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
     else:
@@ -154,33 +161,56 @@ def reset_blue_tray_layout(
     size_cache = getattr(env, "_blue_tray_cube_sizes", {})
     poses_by_name = {name: torch.zeros((len(env_ids), 7), device=env.device, dtype=torch.float32) for name in names}
     tray_poses = torch.zeros((len(env_ids), 7), device=env.device, dtype=torch.float32)
+    fixed_trays = getattr(env, "_blue_tray_fixed_tray_poses", None)
+    if fixed_trays is None:
+        fixed_trays = torch.full((env.num_envs, 3), float("nan"), device=env.device, dtype=torch.float32)
+
+    x_min, x_max = (float(value) for value in workspace_x_bounds)
+    y_min, y_max = (float(value) for value in workspace_y_bounds)
+    y_mid = 0.5 * (y_min + y_max)
+    tray_half_x = 0.5 * float(tray_size[0])
+    tray_half_y = 0.5 * float(tray_size[1])
 
     for row, env_id_tensor in enumerate(env_ids):
         env_id = int(env_id_tensor.item())
-        # Generator bounds: x=(0.40, 0.62), y=(0.04, 0.30), minus tray half extents.
-        tray_x = float(
-            torch.empty(1, device=env.device).uniform_(0.40 + 0.5 * tray_size[0], 0.62 - 0.5 * tray_size[0]).item()
-        )
-        tray_y = float(
-            torch.empty(1, device=env.device).uniform_(0.04 + 0.5 * tray_size[1], 0.30 - 0.5 * tray_size[1]).item()
-        )
-        tray_poses[row, :3] = torch.tensor((tray_x, tray_y, 0.5 * tray_size[2]), device=env.device)
+        if torch.isnan(fixed_trays[env_id, 0]):
+            tray_positive = bool(torch.randint(0, 2, (1,), device=env.device).item())
+            tray_y_bounds = (y_mid + min_spacing, y_max) if tray_positive else (y_min, y_mid - min_spacing)
+            for _ in range(512):
+                tray_x = float(
+                    torch.empty(1, device=env.device).uniform_(x_min + tray_half_x, x_max - tray_half_x).item()
+                )
+                tray_y = float(
+                    torch.empty(1, device=env.device)
+                    .uniform_(tray_y_bounds[0] + tray_half_y, tray_y_bounds[1] - tray_half_y)
+                    .item()
+                )
+                if math.hypot(tray_x, tray_y) <= workspace_radius_max:
+                    break
+            else:
+                raise RuntimeError("Could not sample a reachable fixed tray pose")
+            fixed_trays[env_id] = torch.tensor((tray_x, tray_y, tray_z), device=env.device)
+
+        tray_x, tray_y, fixed_tray_z = (float(value) for value in fixed_trays[env_id].tolist())
+        cube_y_bounds = (y_min, y_mid - min_spacing) if tray_y >= y_mid else (y_mid + min_spacing, y_max)
+        tray_poses[row, :3] = torch.tensor((tray_x, tray_y, fixed_tray_z), device=env.device)
         tray_poses[row, 6] = 1.0
 
-        occupied: list[tuple[float, float, float, float]] = [(tray_x, tray_y, 0.5 * tray_size[0], 0.5 * tray_size[1])]
+        occupied: list[tuple[float, float, float, float]] = [(tray_x, tray_y, tray_half_x, tray_half_y)]
         spread_refs: list[tuple[float, float]] = []
         for name, fallback_size in zip(names, cube_sizes, strict=True):
             cached = size_cache.get(name)
-            if cached is None:
-                size = fallback_size
-            else:
-                size = tuple(float(value) for value in cached[env_id].tolist())
-            half = 0.5 * max(size[0], size[1])
+            size = fallback_size if cached is None else tuple(float(value) for value in cached[env_id].tolist())
+            half = 0.5 * math.hypot(size[0], size[1])
             candidates: list[tuple[float, float, float]] = []
             for _ in range(512):
-                x = float(torch.empty(1, device=env.device).uniform_(0.33 + half, 0.62 - half).item())
-                y = float(torch.empty(1, device=env.device).uniform_(-0.30 + half, 0.30 - half).item())
-                if math.hypot(x, y) > 0.66:
+                x = float(torch.empty(1, device=env.device).uniform_(x_min + half, x_max - half).item())
+                y = float(
+                    torch.empty(1, device=env.device)
+                    .uniform_(cube_y_bounds[0] + half, cube_y_bounds[1] - half)
+                    .item()
+                )
+                if math.hypot(x, y) > workspace_radius_max:
                     continue
                 if any(
                     abs(x - ox) < half + ohx + min_spacing and abs(y - oy) < half + ohy + min_spacing
@@ -193,9 +223,8 @@ def reset_blue_tray_layout(
             if not candidates:
                 raise RuntimeError(f"Could not sample a spread reset pose for {name}")
             candidates.sort(reverse=True)
-            top_count = max(1, min(len(candidates), max(8, len(candidates) // 10)))
-            choice = int(torch.randint(top_count, (1,), device=env.device).item())
-            _, x, y = candidates[choice]
+            top_count = max(1, min(len(candidates), max(16, math.ceil(len(candidates) * 0.35))))
+            _, x, y = candidates[int(torch.randint(top_count, (1,), device=env.device).item())]
             occupied.append((x, y, half, half))
             spread_refs.append((x, y))
 
@@ -205,6 +234,7 @@ def reset_blue_tray_layout(
                 (0.0, 0.0, math.sin(0.5 * yaw), math.cos(0.5 * yaw)), device=env.device
             )
 
+    env._blue_tray_fixed_tray_poses = fixed_trays
     env_origins = env.scene.env_origins[env_ids]
     for name in names:
         poses_by_name[name][:, :3] += env_origins
@@ -218,6 +248,7 @@ def reset_blue_tray_layout(
     tray.write_root_velocity_to_sim(torch.zeros((len(env_ids), 6), device=env.device), env_ids=env_ids)
 
 
+
 def reset_blue_tray_room(
     env,
     env_ids: torch.Tensor,
@@ -225,6 +256,7 @@ def reset_blue_tray_room(
     local_light_count_range: tuple[int, int],
     local_light_intensity_range: tuple[float, float],
     local_light_radius_range: tuple[float, float],
+    full_random_background: bool,
 ) -> None:
     """Create an isolated room per env and randomize it once per episode reset."""
     import isaaclab.sim as sim_utils
@@ -243,10 +275,11 @@ def reset_blue_tray_room(
 
     for env_id_tensor in env_ids:
         env_id = int(env_id_tensor.item())
-        palette_index = int(torch.randint(len(BACKGROUND_PALETTE), (1,), device=env.device).item())
-        background = torch.tensor(BACKGROUND_PALETTE[palette_index], device=env.device)
-        background += torch.empty(3, device=env.device).uniform_(-background_color_jitter, background_color_jitter)
-        background_color = tuple(float(value) for value in background.clamp_(0.0, 1.0).tolist())
+        if full_random_background:
+            background = torch.rand(3, device=env.device)
+        else:
+            background = torch.tensor((0.10, 0.12, 0.15), device=env.device)
+        background_color = tuple(float(value) for value in background.tolist())
 
         for face_name, face_size, face_position in ROOM_FACES:
             prim_path = f"/World/envs/env_{env_id}/{face_name}"
@@ -327,7 +360,11 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
     friction_range: list[float] = field(default_factory=lambda: [0.45, 1.10])
     restitution_range: list[float] = field(default_factory=lambda: [0.0, 0.12])
     tray_size: list[float] = field(default_factory=lambda: [0.22, 0.18, 0.025])
+    tray_z: float = 0.013
     min_spawn_spacing: float = 0.04
+    workspace_x_bounds: list[float] = field(default_factory=lambda: list(WORKSPACE_X_BOUNDS))
+    workspace_y_bounds: list[float] = field(default_factory=lambda: list(WORKSPACE_Y_BOUNDS))
+    workspace_radius_max: float = WORKSPACE_RADIUS_MAX
     episode_length_s: float = 75.0
     randomize_room_appearance: bool = True
     background_color_jitter: float = 0.06
@@ -343,7 +380,10 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
         assert len(self.cube_mass_range) == 2 and 0.0 < self.cube_mass_range[0] <= self.cube_mass_range[1]
         assert len(self.friction_range) == 2 and 0.0 <= self.friction_range[0] <= self.friction_range[1]
         assert len(self.restitution_range) == 2 and 0.0 <= self.restitution_range[0] <= self.restitution_range[1]
-        assert len(self.tray_size) == 3
+        assert len(self.tray_size) == 3 and self.tray_z > 0.0
+        assert len(self.workspace_x_bounds) == 2 and self.workspace_x_bounds[0] < self.workspace_x_bounds[1]
+        assert len(self.workspace_y_bounds) == 2 and self.workspace_y_bounds[0] < self.workspace_y_bounds[1]
+        assert self.workspace_radius_max > 0.0
         assert 0.0 <= self.background_color_jitter <= 1.0
         assert len(self.local_light_count_range) == 2
         assert 1 <= self.local_light_count_range[0] <= self.local_light_count_range[1]
@@ -528,6 +568,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                 table_name,
                 background_colors,
                 background_jitter: float,
+                full_random_background: bool,
                 blue_color,
                 red_color,
                 cube_jitter: float,
@@ -550,8 +591,13 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
 
                 for env_id_tensor in env_ids:
                     env_id = int(env_id_tensor.item())
+                    room_values = (
+                        np.asarray([torch.rand(3, device=env.device).cpu().tolist()], dtype=np.float32)
+                        if full_random_background
+                        else sampled_values(background_colors, background_jitter)
+                    )
                     role_values = {
-                        "room": sampled_values(background_colors, background_jitter),
+                        "room": room_values,
                         "blue": sampled_values((blue_color,), cube_jitter),
                         "red": sampled_values((red_color,), cube_jitter),
                         "tray": sampled_values(tray_colors, surface_jitter),
@@ -741,7 +787,11 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                         "cube_sizes": cube_sizes,
                         "tray_name": tray.name,
                         "tray_size": cfg.tray_size,
+                        "tray_z": cfg.tray_z,
                         "min_spacing": cfg.min_spawn_spacing,
+                        "workspace_x_bounds": tuple(cfg.workspace_x_bounds),
+                        "workspace_y_bounds": tuple(cfg.workspace_y_bounds),
+                        "workspace_radius_max": cfg.workspace_radius_max,
                     },
                 ),
             ),
@@ -766,6 +816,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                         "local_light_radius_range": (
                             tuple(cfg.local_light_radius_range) if cfg.randomize_room_appearance else (0.12, 0.12)
                         ),
+                        "full_random_background": cfg.randomize_room_appearance,
                     },
                 ),
             ),
@@ -784,6 +835,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                             BACKGROUND_PALETTE if cfg.randomize_room_appearance else ((0.10, 0.12, 0.15),)
                         ),
                         "background_jitter": cfg.background_color_jitter if cfg.randomize_room_appearance else 0.0,
+                        "full_random_background": cfg.randomize_room_appearance,
                         "blue_color": (0.03, 0.16, 0.95),
                         "red_color": (0.95, 0.04, 0.03),
                         "cube_jitter": 0.04 if cfg.randomize_room_appearance else 0.0,

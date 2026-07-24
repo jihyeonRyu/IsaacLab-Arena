@@ -104,7 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Comma-separated physical GPU IDs; defaults to 0..num_gpus-1.",
     )
-    parser.add_argument("--episodes-per-task", type=int, default=10)
+    parser.add_argument("--episodes-per-task", type=int, default=100)
     parser.add_argument("--base-port", type=int, default=5555)
     parser.add_argument("--server-timeout-sec", type=float, default=900.0)
     parser.add_argument("--arena-repo", type=Path, default=arena_repo)
