@@ -196,39 +196,57 @@ def reset_blue_tray_layout(
         tray_poses[row, :3] = torch.tensor((tray_x, tray_y, fixed_tray_z), device=env.device)
         tray_poses[row, 6] = 1.0
 
-        occupied: list[tuple[float, float, float, float]] = [(tray_x, tray_y, tray_half_x, tray_half_y)]
-        spread_refs: list[tuple[float, float]] = []
-        for name, fallback_size in zip(names, cube_sizes, strict=True):
-            cached = size_cache.get(name)
-            size = fallback_size if cached is None else tuple(float(value) for value in cached[env_id].tolist())
-            half = 0.5 * math.hypot(size[0], size[1])
-            candidates: list[tuple[float, float, float]] = []
-            for _ in range(512):
-                x = float(torch.empty(1, device=env.device).uniform_(x_min + half, x_max - half).item())
-                y = float(
-                    torch.empty(1, device=env.device)
-                    .uniform_(cube_y_bounds[0] + half, cube_y_bounds[1] - half)
-                    .item()
-                )
-                if math.hypot(x, y) > workspace_radius_max:
-                    continue
-                if any(
-                    abs(x - ox) < half + ohx + min_spacing and abs(y - oy) < half + ohy + min_spacing
-                    for ox, oy, ohx, ohy in occupied
-                ):
-                    continue
-                refs = spread_refs if spread_refs else [(ox, oy) for ox, oy, _, _ in occupied]
-                spread_score = min(math.hypot(x - px, y - py) for px, py in refs)
-                candidates.append((spread_score, x, y))
-            if not candidates:
-                raise RuntimeError(f"Could not sample a spread reset pose for {name}")
-            candidates.sort(reverse=True)
-            top_count = max(1, min(len(candidates), max(16, math.ceil(len(candidates) * 0.35))))
-            _, x, y = candidates[int(torch.randint(top_count, (1,), device=env.device).item())]
-            occupied.append((x, y, half, half))
-            spread_refs.append((x, y))
+        sampled_objects = None
+        for layout_attempt in range(128):
+            layout_y_bounds = cube_y_bounds if layout_attempt < 32 else (y_min, y_max)
+            if layout_attempt < 64:
+                layout_spacing = min_spacing
+            elif layout_attempt < 96:
+                layout_spacing = 0.5 * min_spacing
+            else:
+                layout_spacing = 0.0
+            occupied: list[tuple[float, float, float, float]] = [(tray_x, tray_y, tray_half_x, tray_half_y)]
+            spread_refs: list[tuple[float, float]] = []
+            candidate_objects: list[tuple[str, tuple[float, float, float], float, float, float]] = []
+            for name, fallback_size in zip(names, cube_sizes, strict=True):
+                cached = size_cache.get(name)
+                size = fallback_size if cached is None else tuple(float(value) for value in cached[env_id].tolist())
+                half = 0.5 * math.hypot(size[0], size[1])
+                candidates: list[tuple[float, float, float]] = []
+                for _ in range(512):
+                    x = float(torch.empty(1, device=env.device).uniform_(x_min + half, x_max - half).item())
+                    y = float(
+                        torch.empty(1, device=env.device)
+                        .uniform_(layout_y_bounds[0] + half, layout_y_bounds[1] - half)
+                        .item()
+                    )
+                    if math.hypot(x, y) > workspace_radius_max:
+                        continue
+                    if any(
+                        abs(x - ox) < half + ohx + layout_spacing
+                            and abs(y - oy) < half + ohy + layout_spacing
+                        for ox, oy, ohx, ohy in occupied
+                    ):
+                        continue
+                    refs = spread_refs if spread_refs else [(ox, oy) for ox, oy, _, _ in occupied]
+                    spread_score = min(math.hypot(x - px, y - py) for px, py in refs)
+                    candidates.append((spread_score, x, y))
+                if not candidates:
+                    break
+                candidates.sort(reverse=True)
+                top_count = max(1, min(len(candidates), max(16, math.ceil(len(candidates) * 0.35))))
+                _, x, y = candidates[int(torch.randint(top_count, (1,), device=env.device).item())]
+                occupied.append((x, y, half, half))
+                spread_refs.append((x, y))
+                yaw = float(torch.empty(1, device=env.device).uniform_(-math.pi, math.pi).item())
+                candidate_objects.append((name, size, x, y, yaw))
+            if len(candidate_objects) == len(names):
+                sampled_objects = candidate_objects
+                break
+        if sampled_objects is None:
+            raise RuntimeError("Could not sample a complete tray-clear reset layout after 128 attempts")
 
-            yaw = float(torch.empty(1, device=env.device).uniform_(-math.pi, math.pi).item())
+        for name, size, x, y, yaw in sampled_objects:
             poses_by_name[name][row, :3] = torch.tensor((x, y, 0.5 * size[2] + 0.001), device=env.device)
             poses_by_name[name][row, 3:7] = torch.tensor(
                 (0.0, 0.0, math.sin(0.5 * yaw), math.cos(0.5 * yaw)), device=env.device
