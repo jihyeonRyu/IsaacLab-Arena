@@ -63,9 +63,14 @@ def build_worker_overrides(rank: int, episode_count: int, task_name: str | None 
     return overrides
 
 
-def summarize_results(output_dir: Path, expected_episodes_per_task: int) -> dict[str, dict[str, float | int]]:
+def summarize_results(
+    output_dir: Path,
+    expected_episodes_per_task: int,
+    task_names: tuple[str, ...] | None = None,
+) -> dict[str, dict[str, float | int]]:
     """Aggregate worker JSONL files into task-level episode counts and success rates."""
-    records_by_task: dict[str, list[dict]] = {task_name: [] for task_name in TASK_BASE_SEEDS}
+    selected_tasks = tuple(TASK_BASE_SEEDS) if task_names is None else task_names
+    records_by_task: dict[str, list[dict]] = {task_name: [] for task_name in selected_tasks}
     for results_path in sorted(output_dir.rglob("episode_results*.jsonl")):
         for line in results_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -105,6 +110,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated physical GPU IDs; defaults to 0..num_gpus-1.",
     )
     parser.add_argument("--episodes-per-task", type=int, default=100)
+    parser.add_argument("--task", choices=tuple(TASK_BASE_SEEDS), default=None)
     parser.add_argument("--base-port", type=int, default=5555)
     parser.add_argument("--server-timeout-sec", type=float, default=900.0)
     parser.add_argument("--arena-repo", type=Path, default=arena_repo)
@@ -288,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     gpu_ids = _parse_gpu_ids(args)
     worker_count = len(gpu_ids)
+    selected_tasks = tuple(TASK_BASE_SEEDS) if args.task is None else (args.task,)
     episode_counts = split_episode_budget(args.episodes_per_task, worker_count)
     ports = [args.base_port + rank for rank in range(worker_count)]
     output_dir = args.output_dir
@@ -301,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     for rank, (gpu_id, port, episode_count) in enumerate(zip(gpu_ids, ports, episode_counts, strict=True)):
         print(f"[rank {rank}] GPU {gpu_id}, port {port}, episodes/task {episode_count}")
         print(f"  server: {_command_text(gpu_id, _server_command(args, port))}")
-    for task_name in TASK_BASE_SEEDS:
+    for task_name in selected_tasks:
         task_slug = task_name.removeprefix("franka_blue_tray_")
         print(f"[task {task_name}] fresh Arena process per GPU")
         for rank, (gpu_id, port, episode_count) in enumerate(zip(gpu_ids, ports, episode_counts, strict=True)):
@@ -326,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
         "episodes_per_task": args.episodes_per_task,
         "episode_counts_by_rank": episode_counts,
         "task_base_seeds": TASK_BASE_SEEDS,
+        "selected_tasks": selected_tasks,
         "fresh_arena_process_per_task": True,
         "rtx_kit_args": RTX_KIT_ARGS,
         "task_seeds_by_rank": [
@@ -370,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
             assert result.returncode == 0, f"GR00T server rank {rank} was not ready; see {wait_log_path}"
             assert server_processes[rank].poll() is None, f"GR00T server rank {rank} exited during startup"
 
-        for task_name in TASK_BASE_SEEDS:
+        for task_name in selected_tasks:
             task_worker_processes = []
             task_slug = task_name.removeprefix("franka_blue_tray_")
             print(f"Starting fresh Arena processes for task '{task_name}'", flush=True)
@@ -411,7 +419,7 @@ def main(argv: list[str] | None = None) -> int:
             log_handle.close()
         signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
-    summary = summarize_results(output_dir, args.episodes_per_task)
+    summary = summarize_results(output_dir, args.episodes_per_task, selected_tasks)
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
