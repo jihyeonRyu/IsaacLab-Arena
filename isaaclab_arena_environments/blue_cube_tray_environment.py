@@ -152,6 +152,7 @@ def reset_blue_tray_layout(
     workspace_x_bounds: tuple[float, float],
     workspace_y_bounds: tuple[float, float],
     workspace_radius_max: float,
+    target_workspace_bins: tuple[int, int],
 ) -> None:
     """Match the recorded training layout distribution exactly."""
     if env_ids is None:
@@ -166,6 +167,9 @@ def reset_blue_tray_layout(
     fixed_trays = getattr(env, "_blue_tray_fixed_tray_poses", None)
     if fixed_trays is None:
         fixed_trays = torch.full((env.num_envs, 3), float("nan"), device=env.device, dtype=torch.float32)
+    layout_reset_counts = getattr(env, "_blue_tray_layout_reset_counts", None)
+    if layout_reset_counts is None:
+        layout_reset_counts = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
 
     x_min, x_max = (float(value) for value in workspace_x_bounds)
     y_min, y_max = (float(value) for value in workspace_y_bounds)
@@ -195,57 +199,144 @@ def reset_blue_tray_layout(
         tray_poses[row, 6] = 1.0
 
         sampled_objects = None
+        x_bins, y_bins = (int(value) for value in target_workspace_bins)
+        layout_ordinal = int(layout_reset_counts[env_id].item())
+        y_stride = max(1, y_bins // max(1, len(blue_cube_names)))
+        x_stride = max(1, x_bins // max(1, len(blue_cube_names)))
+        x_multiplier = max(1, x_bins - 1)
+        while math.gcd(x_multiplier, x_bins) != 1:
+            x_multiplier -= 1
+        y_multiplier = max(1, y_bins - 1)
+        while math.gcd(y_multiplier, y_bins) != 1:
+            y_multiplier -= 1
+        seed_value = int(torch.initial_seed()) + env_id * 97
+        x_offset = seed_value % x_bins
+        y_offset = (seed_value // max(1, x_bins)) % y_bins
+        blue_indices = {name: index for index, name in enumerate(blue_cube_names)}
+
         for layout_attempt in range(128):
-            # The generator samples every cube over the complete table Y range.
-            # Spread scoring naturally favors the opposite side most of the time
-            # without excluding the same-side cases present in training.
+            # Keep the full training clearance from the tray on every retry.
+            # Only inter-object spacing is relaxed for rare dense five-object
+            # layouts, matching the generator's ability to retry the layout.
             layout_y_bounds = (y_min, y_max)
             if layout_attempt < 64:
-                layout_spacing = min_spacing
+                object_spacing = min_spacing
             elif layout_attempt < 96:
-                layout_spacing = 0.5 * min_spacing
+                object_spacing = 0.5 * min_spacing
             else:
-                layout_spacing = 0.0
-            occupied: list[tuple[float, float, float, float]] = [(tray_x, tray_y, tray_half_x, tray_half_y)]
+                object_spacing = 0.0
+            occupied: list[tuple[float, float, float, float]] = [
+                (tray_x, tray_y, tray_half_x, tray_half_y)
+            ]
             spread_refs: list[tuple[float, float]] = []
             candidate_objects: list[tuple[str, tuple[float, float, float], float, float, float]] = []
             for name, fallback_size in zip(names, cube_sizes, strict=True):
                 cached = size_cache.get(name)
                 size = fallback_size if cached is None else tuple(float(value) for value in cached[env_id].tolist())
                 half = 0.5 * math.hypot(size[0], size[1])
-                candidates: list[tuple[float, float, float]] = []
-                for _ in range(512):
-                    x = float(torch.empty(1, device=env.device).uniform_(x_min + half, x_max - half).item())
-                    y = float(
-                        torch.empty(1, device=env.device)
-                        .uniform_(layout_y_bounds[0] + half, layout_y_bounds[1] - half)
-                        .item()
+
+                def overlaps_existing(x: float, y: float) -> bool:
+                    return any(
+                        abs(x - ox)
+                        < half + ohx + (min_spacing if occupied_index == 0 else object_spacing)
+                        and abs(y - oy)
+                        < half + ohy + (min_spacing if occupied_index == 0 else object_spacing)
+                        for occupied_index, (ox, oy, ohx, ohy) in enumerate(occupied)
                     )
-                    if math.hypot(x, y) > workspace_radius_max:
-                        continue
-                    if any(
-                        abs(x - ox) < half + ohx + layout_spacing
-                            and abs(y - oy) < half + ohy + layout_spacing
-                        for ox, oy, ohx, ohy in occupied
-                    ):
-                        continue
-                    refs = spread_refs if spread_refs else [(ox, oy) for ox, oy, _, _ in occupied]
-                    spread_score = min(math.hypot(x - px, y - py) for px, py in refs)
-                    candidates.append((spread_score, x, y))
-                if not candidates:
+
+                selected_xy: tuple[float, float] | None = None
+                if name in blue_indices:
+                    blue_index = blue_indices[name]
+                    logical_y_start = (
+                        layout_ordinal + blue_index * y_stride
+                    ) % y_bins
+                    logical_x_start = (
+                        layout_ordinal // y_bins + blue_index * x_stride
+                    ) % x_bins
+                    usable_x_min = x_min + half
+                    usable_x_max = x_max - half
+                    usable_y_min = layout_y_bounds[0] + half
+                    usable_y_max = layout_y_bounds[1] - half
+                    for y_step in range(y_bins):
+                        y_index = (
+                            (logical_y_start + y_step) * y_multiplier + y_offset
+                        ) % y_bins
+                        for x_step in range(x_bins):
+                            x_index = (
+                                (logical_x_start + x_step) * x_multiplier + x_offset
+                            ) % x_bins
+                            cell_x_min = usable_x_min + (usable_x_max - usable_x_min) * x_index / x_bins
+                            cell_x_max = usable_x_min + (usable_x_max - usable_x_min) * (x_index + 1) / x_bins
+                            cell_y_min = usable_y_min + (usable_y_max - usable_y_min) * y_index / y_bins
+                            cell_y_max = usable_y_min + (usable_y_max - usable_y_min) * (y_index + 1) / y_bins
+                            for _ in range(64):
+                                x = float(
+                                    torch.empty(1, device=env.device)
+                                    .uniform_(cell_x_min, cell_x_max)
+                                    .item()
+                                )
+                                y = float(
+                                    torch.empty(1, device=env.device)
+                                    .uniform_(cell_y_min, cell_y_max)
+                                    .item()
+                                )
+                                if math.hypot(x, y) > workspace_radius_max or overlaps_existing(x, y):
+                                    continue
+                                selected_xy = (x, y)
+                                break
+                            if selected_xy is not None:
+                                break
+                        if selected_xy is not None:
+                            break
+                else:
+                    candidates: list[tuple[float, float, float]] = []
+                    for _ in range(512):
+                        x = float(torch.empty(1, device=env.device).uniform_(x_min + half, x_max - half).item())
+                        y = float(
+                            torch.empty(1, device=env.device)
+                            .uniform_(layout_y_bounds[0] + half, layout_y_bounds[1] - half)
+                            .item()
+                        )
+                        if math.hypot(x, y) > workspace_radius_max or overlaps_existing(x, y):
+                            continue
+                        refs = spread_refs if spread_refs else [(ox, oy) for ox, oy, _, _ in occupied]
+                        spread_score = min(math.hypot(x - px, y - py) for px, py in refs)
+                        candidates.append((spread_score, x, y))
+                    if candidates:
+                        candidates.sort(reverse=True)
+                        top_count = max(
+                            1,
+                            min(len(candidates), max(16, math.ceil(len(candidates) * 0.35))),
+                        )
+                        _, x, y = candidates[
+                            int(torch.randint(top_count, (1,), device=env.device).item())
+                        ]
+                        selected_xy = (x, y)
+
+                if selected_xy is None:
                     break
-                candidates.sort(reverse=True)
-                top_count = max(1, min(len(candidates), max(16, math.ceil(len(candidates) * 0.35))))
-                _, x, y = candidates[int(torch.randint(top_count, (1,), device=env.device).item())]
+                x, y = selected_xy
                 occupied.append((x, y, half, half))
                 spread_refs.append((x, y))
                 yaw = float(torch.empty(1, device=env.device).uniform_(-math.pi, math.pi).item())
                 candidate_objects.append((name, size, x, y, yaw))
             if len(candidate_objects) == len(names):
+                # Fail closed if a future sampler change ever puts an object in
+                # or too close to the tray footprint.
+                for _name, size, x, y, _yaw in candidate_objects:
+                    half = 0.5 * math.hypot(size[0], size[1])
+                    if (
+                        abs(x - tray_x) < tray_half_x + half + min_spacing
+                        and abs(y - tray_y) < tray_half_y + half + min_spacing
+                    ):
+                        raise RuntimeError(
+                            f"Arena sampled object {_name} inside the tray-clear envelope"
+                        )
                 sampled_objects = candidate_objects
                 break
         if sampled_objects is None:
             raise RuntimeError("Could not sample a complete tray-clear reset layout after 128 attempts")
+        layout_reset_counts[env_id] += 1
 
         for name, size, x, y, yaw in sampled_objects:
             poses_by_name[name][row, :3] = torch.tensor((x, y, 0.5 * size[2] + 0.001), device=env.device)
@@ -254,6 +345,7 @@ def reset_blue_tray_layout(
             )
 
     env._blue_tray_fixed_tray_poses = fixed_trays
+    env._blue_tray_layout_reset_counts = layout_reset_counts
     env_origins = env.scene.env_origins[env_ids]
     for name in names:
         poses_by_name[name][:, :3] += env_origins
@@ -506,6 +598,7 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
     workspace_x_bounds: list[float] = field(default_factory=lambda: list(WORKSPACE_X_BOUNDS))
     workspace_y_bounds: list[float] = field(default_factory=lambda: list(WORKSPACE_Y_BOUNDS))
     workspace_radius_max: float = WORKSPACE_RADIUS_MAX
+    target_workspace_bins: list[int] = field(default_factory=lambda: [4, 6])
     episode_length_s: float = 75.0
     randomize_room_appearance: bool = True
     background_color_jitter: float = 0.06
@@ -538,6 +631,10 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
         assert len(self.workspace_x_bounds) == 2 and self.workspace_x_bounds[0] < self.workspace_x_bounds[1]
         assert len(self.workspace_y_bounds) == 2 and self.workspace_y_bounds[0] < self.workspace_y_bounds[1]
         assert self.workspace_radius_max > 0.0
+        assert len(self.target_workspace_bins) == 2 and all(
+            int(value) >= 1 for value in self.target_workspace_bins
+        )
+        assert math.prod(int(value) for value in self.target_workspace_bins) >= self.num_blue_cubes
         assert 0.0 <= self.background_color_jitter <= 1.0
         assert len(self.local_light_count_range) == 2
         assert 1 <= self.local_light_count_range[0] <= self.local_light_count_range[1]
@@ -1020,6 +1117,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                         "workspace_x_bounds": tuple(cfg.workspace_x_bounds),
                         "workspace_y_bounds": tuple(cfg.workspace_y_bounds),
                         "workspace_radius_max": cfg.workspace_radius_max,
+                        "target_workspace_bins": tuple(cfg.target_workspace_bins),
                     },
                 ),
             ),

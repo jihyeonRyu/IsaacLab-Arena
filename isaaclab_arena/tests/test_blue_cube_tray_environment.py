@@ -41,6 +41,7 @@ def test_environment_cfg_accepts_training_distribution_limits():
     assert cfg.workspace_x_bounds == [0.33, 0.70]
     assert cfg.workspace_y_bounds == [-0.34, 0.34]
     assert cfg.workspace_radius_max == 0.68
+    assert cfg.target_workspace_bins == [4, 6]
     assert cfg.tray_z == 0.013
     assert cfg.local_light_count_range == [3, 3]
 
@@ -85,6 +86,7 @@ def test_five_object_layout_retries_without_tray_overlap():
             (0.33, 0.70),
             (-0.34, 0.34),
             0.68,
+            (4, 6),
         )
         tray = env.scene["green_tray"].pose[0, :3]
         if fixed_tray is None:
@@ -95,6 +97,6 @@ def test_five_object_layout_retries_without_tray_overlap():
             pos = env.scene[name].pose[0, :2]
             radius = 0.5 * (2.0**0.5) * 0.065
             assert not (
-                abs(float(pos[0] - tray[0])) < 0.11 + radius
-                and abs(float(pos[1] - tray[1])) < 0.09 + radius
+                abs(float(pos[0] - tray[0])) < 0.11 + radius + 0.04
+                and abs(float(pos[1] - tray[1])) < 0.09 + radius + 0.04
             )
