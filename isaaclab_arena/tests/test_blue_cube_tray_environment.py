@@ -14,6 +14,7 @@ from isaaclab_arena_environments.blue_cube_tray_environment import (
     CAMERA_HORIZONTAL_APERTURE,
     CAMERA_WIDTH,
     EXTERNAL_CAMERA_FOCAL_LENGTH,
+    TRAINING_TRAY_X,
     WRIST_CAMERA_FOCAL_LENGTH,
     BlueCubeTrayEnvironmentCfg,
     reset_blue_tray_layout,
@@ -35,7 +36,8 @@ def test_environment_cfg_rejects_invalid_cube_count():
 
 def test_environment_cfg_accepts_training_distribution_limits():
     cfg = BlueCubeTrayEnvironmentCfg(num_blue_cubes=3, num_red_cubes=2, enable_cameras=True)
-    assert cfg.cube_size_range == [0.05, 0.065]
+    assert cfg.cube_size_range == [0.05, 0.05]
+    assert cfg.tray_x == TRAINING_TRAY_X == 0.51
     assert cfg.workspace_x_bounds == [0.33, 0.70]
     assert cfg.workspace_y_bounds == [-0.34, 0.34]
     assert cfg.workspace_radius_max == 0.68
@@ -77,6 +79,7 @@ def test_five_object_layout_retries_without_tray_overlap():
             tuple((0.05, 0.05, 0.05) for _ in names),
             "green_tray",
             (0.22, 0.18, 0.025),
+            TRAINING_TRAY_X,
             0.013,
             0.04,
             (0.33, 0.70),
@@ -87,6 +90,7 @@ def test_five_object_layout_retries_without_tray_overlap():
         if fixed_tray is None:
             fixed_tray = tray.clone()
         assert torch.equal(tray, fixed_tray)
+        assert float(tray[0]) == pytest.approx(TRAINING_TRAY_X)
         for name in names:
             pos = env.scene[name].pose[0, :2]
             radius = 0.5 * (2.0**0.5) * 0.065

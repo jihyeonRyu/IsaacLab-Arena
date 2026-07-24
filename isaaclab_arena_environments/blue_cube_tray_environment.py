@@ -65,6 +65,7 @@ WRIST_CAMERA_FOCAL_LENGTH = 10.0
 WORKSPACE_X_BOUNDS = (0.33, 0.70)
 WORKSPACE_Y_BOUNDS = (-0.34, 0.34)
 WORKSPACE_RADIUS_MAX = 0.68
+TRAINING_TRAY_X = 0.51
 
 
 def update_blue_tray_wrist_camera(
@@ -145,13 +146,14 @@ def reset_blue_tray_layout(
     cube_sizes: tuple[tuple[float, float, float], ...],
     tray_name: str,
     tray_size: tuple[float, float, float],
+    tray_x: float,
     tray_z: float,
     min_spacing: float,
     workspace_x_bounds: tuple[float, float],
     workspace_y_bounds: tuple[float, float],
     workspace_radius_max: float,
 ) -> None:
-    """Match generator workspace, fixed-tray slots, reach limit, and spread sampling."""
+    """Match the recorded training layout distribution exactly."""
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
     else:
@@ -167,7 +169,6 @@ def reset_blue_tray_layout(
 
     x_min, x_max = (float(value) for value in workspace_x_bounds)
     y_min, y_max = (float(value) for value in workspace_y_bounds)
-    y_mid = 0.5 * (y_min + y_max)
     tray_half_x = 0.5 * float(tray_size[0])
     tray_half_y = 0.5 * float(tray_size[1])
 
@@ -175,11 +176,9 @@ def reset_blue_tray_layout(
         env_id = int(env_id_tensor.item())
         if torch.isnan(fixed_trays[env_id, 0]):
             tray_positive = bool(torch.randint(0, 2, (1,), device=env.device).item())
+            y_mid = 0.5 * (y_min + y_max)
             tray_y_bounds = (y_mid + min_spacing, y_max) if tray_positive else (y_min, y_mid - min_spacing)
             for _ in range(512):
-                tray_x = float(
-                    torch.empty(1, device=env.device).uniform_(x_min + tray_half_x, x_max - tray_half_x).item()
-                )
                 tray_y = float(
                     torch.empty(1, device=env.device)
                     .uniform_(tray_y_bounds[0] + tray_half_y, tray_y_bounds[1] - tray_half_y)
@@ -192,13 +191,15 @@ def reset_blue_tray_layout(
             fixed_trays[env_id] = torch.tensor((tray_x, tray_y, tray_z), device=env.device)
 
         tray_x, tray_y, fixed_tray_z = (float(value) for value in fixed_trays[env_id].tolist())
-        cube_y_bounds = (y_min, y_mid - min_spacing) if tray_y >= y_mid else (y_mid + min_spacing, y_max)
         tray_poses[row, :3] = torch.tensor((tray_x, tray_y, fixed_tray_z), device=env.device)
         tray_poses[row, 6] = 1.0
 
         sampled_objects = None
         for layout_attempt in range(128):
-            layout_y_bounds = cube_y_bounds if layout_attempt < 32 else (y_min, y_max)
+            # The generator samples every cube over the complete table Y range.
+            # Spread scoring naturally favors the opposite side most of the time
+            # without excluding the same-side cases present in training.
+            layout_y_bounds = (y_min, y_max)
             if layout_attempt < 64:
                 layout_spacing = min_spacing
             elif layout_attempt < 96:
@@ -373,11 +374,15 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
     num_blue_cubes: int = 3
     num_red_cubes: int = 2
     cube_size: float = 0.05
-    cube_size_range: list[float] = field(default_factory=lambda: [0.05, 0.065])
+    # The completed training run recorded 5 cm physical cubes. Its intended
+    # per-clone USD scale event remained at unit scale, so evaluation must not
+    # introduce unseen 6.5 cm cuboids.
+    cube_size_range: list[float] = field(default_factory=lambda: [0.05, 0.05])
     cube_mass_range: list[float] = field(default_factory=lambda: [0.035, 0.075])
     friction_range: list[float] = field(default_factory=lambda: [0.45, 1.10])
     restitution_range: list[float] = field(default_factory=lambda: [0.0, 0.12])
     tray_size: list[float] = field(default_factory=lambda: [0.22, 0.18, 0.025])
+    tray_x: float = TRAINING_TRAY_X
     tray_z: float = 0.013
     min_spawn_spacing: float = 0.04
     workspace_x_bounds: list[float] = field(default_factory=lambda: list(WORKSPACE_X_BOUNDS))
@@ -805,6 +810,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
                         "cube_sizes": cube_sizes,
                         "tray_name": tray.name,
                         "tray_size": cfg.tray_size,
+                        "tray_x": cfg.tray_x,
                         "tray_z": cfg.tray_z,
                         "min_spacing": cfg.min_spawn_spacing,
                         "workspace_x_bounds": tuple(cfg.workspace_x_bounds),
