@@ -69,7 +69,7 @@ def build_worker_overrides(
         ])
         if not randomize_policy_start_pose:
             overrides.append(
-                f"runs.{selected_task_name}.environment_builder.randomize_policy_start_pose=false"
+                f"runs.{selected_task_name}.environment.randomize_policy_start_pose=false"
             )
     return overrides
 
