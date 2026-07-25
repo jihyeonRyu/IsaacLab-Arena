@@ -49,7 +49,12 @@ def split_episode_budget(total_episodes: int, worker_count: int) -> list[int]:
     return [base + int(rank < remainder) for rank in range(worker_count)]
 
 
-def build_worker_overrides(rank: int, episode_count: int, task_name: str | None = None) -> list[str]:
+def build_worker_overrides(
+    rank: int,
+    episode_count: int,
+    task_name: str | None = None,
+    randomize_policy_start_pose: bool = True,
+) -> list[str]:
     """Build Hydra overrides for one single-environment, optionally single-task worker."""
     if task_name is not None:
         assert task_name in TASK_BASE_SEEDS, f"Unknown Franka task: {task_name}"
@@ -62,6 +67,10 @@ def build_worker_overrides(rank: int, episode_count: int, task_name: str | None 
             f"runs.{selected_task_name}.policy.sensor_seed={base_seed + rank}",
             f"runs.{selected_task_name}.rollout_limit.num_episodes={episode_count}",
         ])
+        if not randomize_policy_start_pose:
+            overrides.append(
+                f"runs.{selected_task_name}.environment_builder.randomize_policy_start_pose=false"
+            )
     return overrides
 
 
@@ -135,6 +144,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Record observation-camera videos for validation (default: enabled).",
+    )
+    parser.add_argument(
+        "--randomize-policy-start-pose",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Move the EEF to a randomized floor-facing start pose (default: enabled).",
     )
     parser.add_argument(
         "--dry-run",
@@ -252,7 +267,12 @@ def _worker_command(
     ]
     if args.record_camera_video:
         command.append("--record_camera_video")
-    return command + build_worker_overrides(rank, episode_count, task_name)
+    return command + build_worker_overrides(
+        rank,
+        episode_count,
+        task_name,
+        randomize_policy_start_pose=args.randomize_policy_start_pose,
+    )
 
 
 def _process_environment(
@@ -332,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"checkpoint: {args.checkpoint}")
     print(f"output: {output_dir}")
     print(f"workers: {worker_count}; GPUs: {gpu_ids}; episodes/task: {episode_counts}")
+    print(f"randomized policy start pose: {args.randomize_policy_start_pose}")
     for rank, (gpu_id, port, episode_count) in enumerate(zip(gpu_ids, ports, episode_counts, strict=True)):
         print(f"[rank {rank}] GPU {gpu_id}, port {port}, episodes/task {episode_count}")
         print(f"  server: {_command_text(gpu_id, _server_command(args, port))}")
@@ -363,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
         "episode_counts_by_rank": episode_counts,
         "task_base_seeds": TASK_BASE_SEEDS,
         "selected_tasks": selected_tasks,
+        "randomize_policy_start_pose": args.randomize_policy_start_pose,
         "fresh_arena_process_per_task": True,
         "rtx_kit_args": RTX_KIT_ARGS,
         "task_seeds_by_rank": [

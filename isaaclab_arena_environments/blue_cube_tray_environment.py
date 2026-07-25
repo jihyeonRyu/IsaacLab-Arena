@@ -401,29 +401,33 @@ def prepare_blue_tray_policy_episode(env, env_ids: torch.Tensor | None) -> dict:
     env.sim.forward()
     step_open(int(cfg.policy_prepare_stabilize_steps))
 
-    # Translate only: the validated floor-facing gripper orientation is preserved.
-    targets = torch.empty((len(env_ids), 3), device=env.device, dtype=torch.float32)
-    ranges = (cfg.policy_start_ee_x_range, cfg.policy_start_ee_y_range, cfg.policy_start_ee_z_range)
-    for row in range(len(env_ids)):
-        for _ in range(256):
-            candidate = torch.tensor(
-                [float(torch.empty(1, device=env.device).uniform_(*axis_range).item()) for axis_range in ranges],
-                device=env.device,
-                dtype=torch.float32,
-            )
-            radius = float(torch.linalg.vector_norm(candidate[:2]).item())
-            if cfg.policy_start_ee_radius_min <= radius <= cfg.policy_start_ee_radius_max:
-                targets[row] = candidate
-                break
-        else:
-            raise RuntimeError("Could not sample a reachable randomized policy start EEF target")
-
     ee_frame = env.scene["ee_frame"]
 
     def current_pose() -> tuple[torch.Tensor, torch.Tensor]:
         positions = ee_frame.data.target_pos_w[env_ids, 0] - env.scene.env_origins[env_ids]
         quaternions = ee_frame.data.target_quat_w[env_ids, 0]
         return positions, quaternions
+
+    # Translate only: the validated floor-facing gripper orientation is preserved.
+    if cfg.randomize_policy_start_pose:
+        targets = torch.empty((len(env_ids), 3), device=env.device, dtype=torch.float32)
+        ranges = (cfg.policy_start_ee_x_range, cfg.policy_start_ee_y_range, cfg.policy_start_ee_z_range)
+        for row in range(len(env_ids)):
+            for _ in range(256):
+                candidate = torch.tensor(
+                    [float(torch.empty(1, device=env.device).uniform_(*axis_range).item()) for axis_range in ranges],
+                    device=env.device,
+                    dtype=torch.float32,
+                )
+                radius = float(torch.linalg.vector_norm(candidate[:2]).item())
+                if cfg.policy_start_ee_radius_min <= radius <= cfg.policy_start_ee_radius_max:
+                    targets[row] = candidate
+                    break
+            else:
+                raise RuntimeError("Could not sample a reachable randomized policy start EEF target")
+    else:
+        targets, _ = current_pose()
+        targets = targets.clone()
 
     def tool_down_tilt_deg(quaternions: torch.Tensor) -> torch.Tensor:
         # Preserve the generator historical quaternion convention exactly.
@@ -464,6 +468,7 @@ def prepare_blue_tray_policy_episode(env, env_ids: torch.Tensor | None) -> dict:
         raise RuntimeError("Final tool pose exceeds the generator floor-facing tilt limit")
     print(
         "[POLICY-START] "
+        f"mode={'randomized' if cfg.randomize_policy_start_pose else 'default'} "
         f"targets={targets.detach().cpu().tolist()} actual={positions.detach().cpu().tolist()} "
         f"error={final_error.detach().cpu().tolist()} tilt={final_tilt.detach().cpu().tolist()}"
     )
@@ -608,6 +613,7 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
     policy_prepare_settle_steps: int = 72
     policy_prepare_stabilize_steps: int = 14
     policy_prepare_gripper_command: float = 1.0
+    randomize_policy_start_pose: bool = True
     policy_start_ee_x_range: tuple[float, float] = (0.36, 0.70)
     policy_start_ee_y_range: tuple[float, float] = (-0.34, 0.34)
     policy_start_ee_z_range: tuple[float, float] = (0.25, 0.55)
@@ -1215,6 +1221,7 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
             env_cfg.policy_prepare_settle_steps = cfg.policy_prepare_settle_steps
             env_cfg.policy_prepare_stabilize_steps = cfg.policy_prepare_stabilize_steps
             env_cfg.policy_prepare_gripper_command = cfg.policy_prepare_gripper_command
+            env_cfg.randomize_policy_start_pose = cfg.randomize_policy_start_pose
             env_cfg.policy_start_ee_x_range = tuple(cfg.policy_start_ee_x_range)
             env_cfg.policy_start_ee_y_range = tuple(cfg.policy_start_ee_y_range)
             env_cfg.policy_start_ee_z_range = tuple(cfg.policy_start_ee_z_range)
