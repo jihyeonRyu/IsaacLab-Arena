@@ -6,8 +6,8 @@
 # Evaluate each task cardinality separately so success rate is reported for
 # one-, two-, and three-blue-cube episodes instead of hiding the hard cases in
 # one aggregate number.
-# The v4 synthetic generation uses seed 60007 + episode_index
-# (60007..60606 for the 600-attempt run). Keep evaluation RNG streams outside
+# The v5 synthetic generation uses seed 70007 + episode_index
+# (70007..70606 for the 600-attempt run). Keep evaluation RNG streams outside
 # that range.
 runs:
   franka_blue_tray_1_cube:
