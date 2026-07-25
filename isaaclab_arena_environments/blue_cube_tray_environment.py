@@ -613,7 +613,7 @@ class BlueCubeTrayEnvironmentCfg(ArenaEnvironmentCfg):
     policy_prepare_settle_steps: int = 72
     policy_prepare_stabilize_steps: int = 14
     policy_prepare_gripper_command: float = 1.0
-    randomize_policy_start_pose: bool = True
+    randomize_policy_start_pose: bool = False
     policy_start_ee_x_range: tuple[float, float] = (0.36, 0.70)
     policy_start_ee_y_range: tuple[float, float] = (-0.34, 0.34)
     policy_start_ee_z_range: tuple[float, float] = (0.25, 0.55)

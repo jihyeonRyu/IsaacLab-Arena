@@ -35,6 +35,19 @@ def test_worker_overrides_use_one_env_and_distinct_eval_seeds():
         assert f"runs.{task_name}.environment_builder.seed={base_seed + 7}" in rank_seven_overrides
         assert f"runs.{task_name}.policy.sensor_seed={base_seed + 7}" in rank_seven_overrides
         assert f"runs.{task_name}.rollout_limit.num_episodes=1" in rank_seven_overrides
+        assert f"runs.{task_name}.environment.randomize_policy_start_pose=false" in rank_zero_overrides
+        assert f"runs.{task_name}.environment.randomize_policy_start_pose=false" in rank_seven_overrides
+
+
+def test_randomized_start_pose_requires_explicit_opt_in():
+    overrides = build_worker_overrides(
+        rank=0,
+        episode_count=1,
+        task_name="franka_blue_tray_1_cube",
+        randomize_policy_start_pose=True,
+    )
+
+    assert "runs.franka_blue_tray_1_cube.environment.randomize_policy_start_pose=true" in overrides
 
 
 def test_single_task_worker_removes_other_runs_and_syncs_rtx(tmp_path):
@@ -54,6 +67,7 @@ def test_single_task_worker_removes_other_runs_and_syncs_rtx(tmp_path):
             "arena_repo": tmp_path / "arena",
             "experiment_config": tmp_path / "experiment.yaml",
             "record_camera_video": True,
+            "randomize_policy_start_pose": False,
         },
     )()
     command = _worker_command(args, 3, 5658, 1, tmp_path / "output", selected_task)

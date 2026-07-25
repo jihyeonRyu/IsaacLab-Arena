@@ -53,7 +53,7 @@ def build_worker_overrides(
     rank: int,
     episode_count: int,
     task_name: str | None = None,
-    randomize_policy_start_pose: bool = True,
+    randomize_policy_start_pose: bool = False,
 ) -> list[str]:
     """Build Hydra overrides for one single-environment, optionally single-task worker."""
     if task_name is not None:
@@ -67,10 +67,11 @@ def build_worker_overrides(
             f"runs.{selected_task_name}.policy.sensor_seed={base_seed + rank}",
             f"runs.{selected_task_name}.rollout_limit.num_episodes={episode_count}",
         ])
-        if not randomize_policy_start_pose:
-            overrides.append(
-                f"runs.{selected_task_name}.environment.randomize_policy_start_pose=false"
-            )
+        overrides.append(
+            "runs."
+            f"{selected_task_name}.environment.randomize_policy_start_pose="
+            f"{str(randomize_policy_start_pose).lower()}"
+        )
     return overrides
 
 
@@ -148,8 +149,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--randomize-policy-start-pose",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Move the EEF to a randomized floor-facing start pose (default: enabled).",
+        default=False,
+        help="Opt in to a randomized floor-facing EEF start pose (default: fixed default pose).",
     )
     parser.add_argument(
         "--dry-run",
