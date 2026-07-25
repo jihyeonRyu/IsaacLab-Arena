@@ -7,6 +7,7 @@ import json
 
 from isaaclab_arena_gr00t.parallel_evaluation import (
     RTX_KIT_ARGS,
+    _build_parser,
     TASK_BASE_SEEDS,
     _process_environment,
     _worker_command,
@@ -48,6 +49,19 @@ def test_randomized_start_pose_requires_explicit_opt_in():
     )
 
     assert "runs.franka_blue_tray_1_cube.environment.randomize_policy_start_pose=true" in overrides
+
+
+def test_repeated_task_options_select_multiple_tasks():
+    args = _build_parser().parse_args(
+        [
+            "--task",
+            "franka_blue_tray_1_cube",
+            "--task",
+            "franka_blue_tray_2_cubes",
+        ]
+    )
+
+    assert args.task == ["franka_blue_tray_1_cube", "franka_blue_tray_2_cubes"]
 
 
 def test_single_task_worker_removes_other_runs_and_syncs_rtx(tmp_path):

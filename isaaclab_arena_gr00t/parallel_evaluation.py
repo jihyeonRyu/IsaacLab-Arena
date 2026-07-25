@@ -122,7 +122,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated physical GPU IDs; defaults to 0..num_gpus-1.",
     )
     parser.add_argument("--episodes-per-task", type=int, default=100)
-    parser.add_argument("--task", choices=tuple(TASK_BASE_SEEDS), default=None)
+    parser.add_argument(
+        "--task",
+        choices=tuple(TASK_BASE_SEEDS),
+        action="append",
+        default=None,
+        help="Task to evaluate; repeat to select multiple tasks (default: all tasks).",
+    )
     parser.add_argument("--base-port", type=int, default=5555)
     parser.add_argument("--server-timeout-sec", type=float, default=900.0)
     parser.add_argument("--arena-repo", type=Path, default=arena_repo)
@@ -342,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     gpu_ids = _parse_gpu_ids(args)
     worker_count = len(gpu_ids)
-    selected_tasks = tuple(TASK_BASE_SEEDS) if args.task is None else (args.task,)
+    selected_tasks = tuple(TASK_BASE_SEEDS) if args.task is None else tuple(dict.fromkeys(args.task))
     episode_counts = split_episode_budget(args.episodes_per_task, worker_count)
     ports = [args.base_port + rank for rank in range(worker_count)]
     output_dir = args.output_dir
@@ -383,13 +389,13 @@ def main(argv: list[str] | None = None) -> int:
         "ports": ports,
         "episodes_per_task": args.episodes_per_task,
         "episode_counts_by_rank": episode_counts,
-        "task_base_seeds": TASK_BASE_SEEDS,
+        "task_base_seeds": {task_name: TASK_BASE_SEEDS[task_name] for task_name in selected_tasks},
         "selected_tasks": selected_tasks,
         "randomize_policy_start_pose": args.randomize_policy_start_pose,
         "fresh_arena_process_per_task": True,
         "rtx_kit_args": RTX_KIT_ARGS,
         "task_seeds_by_rank": [
-            {task_name: base_seed + rank for task_name, base_seed in TASK_BASE_SEEDS.items()}
+            {task_name: TASK_BASE_SEEDS[task_name] + rank for task_name in selected_tasks}
             for rank in range(worker_count)
         ],
     }
