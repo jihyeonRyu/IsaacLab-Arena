@@ -8,6 +8,7 @@
 import pytest
 import torch
 
+from isaaclab_arena.tasks.blue_cube_tray_task import _center_inside_tray_xy
 from isaaclab_arena_environments.blue_cube_tray_environment import (
     CAMERA_FPS,
     CAMERA_HEIGHT,
@@ -44,6 +45,22 @@ def test_environment_cfg_accepts_training_distribution_limits():
     assert cfg.target_workspace_bins == [4, 6]
     assert cfg.tray_z == 0.013
     assert cfg.local_light_count_range == [3, 3]
+
+
+def test_success_xy_matches_synthetic_generator_center_margin():
+    tray_pos = torch.zeros((3, 3))
+    cube_pos = torch.tensor(
+        [
+            [0.095, 0.075, 0.0],
+            [0.0951, 0.0, 0.0],
+            [0.0, 0.0751, 0.0],
+        ]
+    )
+
+    inside = _center_inside_tray_xy(cube_pos, tray_pos, (0.11, 0.09), margin=0.015)
+
+    assert inside.tolist() == [True, False, False]
+
 
 def test_five_object_layout_retries_without_tray_overlap():
     class DummyAsset:

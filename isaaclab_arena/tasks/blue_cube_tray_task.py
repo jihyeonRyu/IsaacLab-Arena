@@ -52,13 +52,27 @@ def _inside_tray_xy(
     )
 
 
+def _center_inside_tray_xy(
+    object_pos: torch.Tensor,
+    tray_pos: torch.Tensor,
+    tray_half_extents_xy: tuple[float, float],
+    margin: float,
+) -> torch.Tensor:
+    """Match the synthetic generator's center-based tray success criterion."""
+    available_x = tray_half_extents_xy[0] - margin
+    available_y = tray_half_extents_xy[1] - margin
+    return (torch.abs(object_pos[:, 0] - tray_pos[:, 0]) <= available_x) & (
+        torch.abs(object_pos[:, 1] - tray_pos[:, 1]) <= available_y
+    )
+
+
 def all_blue_cubes_in_tray(
     env,
     blue_cube_names: tuple[str, ...],
     tray_name: str,
     cube_sizes: tuple[tuple[float, float, float], ...],
     tray_size: tuple[float, float, float],
-    xy_margin: float = 0.004,
+    xy_margin: float = 0.015,
     velocity_threshold: float = 0.12,
     max_stack_height: float = 0.16,
 ) -> torch.Tensor:
@@ -69,11 +83,10 @@ def all_blue_cubes_in_tray(
     for name, size in zip(blue_cube_names, cube_sizes, strict=True):
         physical_size = _object_sizes(env, name, size)
         pos = _root_pos(env, name)
-        inside_xy = _inside_tray_xy(
+        inside_xy = _center_inside_tray_xy(
             pos,
             tray_pos,
             (0.5 * tray_size[0], 0.5 * tray_size[1]),
-            0.5 * physical_size[:, :2],
             xy_margin,
         )
         bottom = pos[:, 2] - 0.5 * physical_size[:, 2]
