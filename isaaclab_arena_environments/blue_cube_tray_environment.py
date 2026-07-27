@@ -989,8 +989,6 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
         table.usd_path = table.usd_path.replace("/Assets/Isaac/6.0/", "/Assets/Isaac/5.1/")
         table.object_cfg.spawn.usd_path = table.usd_path
         table.set_initial_pose(Pose(position_xyz=(0.5, 0.0, 0.0), rotation_xyzw=(0.0, 0.0, 0.7071068, 0.7071068)))
-        ground = self.asset_registry.get_asset_by_name("ground_plane")()
-        ground.set_initial_pose(Pose(position_xyz=(0.0, 0.0, -1.05)))
         dome_light = self.asset_registry.get_asset_by_name("light")()
         dome_light.spawner_cfg.visible_in_primary_ray = False
         dome_light.set_color((0.86, 0.86, 0.86))
@@ -1067,7 +1065,6 @@ class BlueCubeTrayEnvironment(ArenaEnvironmentFactory[BlueCubeTrayEnvironmentCfg
         scene = Scene(
             assets=[
                 table,
-                ground,
                 dome_light,
                 tray,
                 *cubes,
