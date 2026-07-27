@@ -4,12 +4,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import sys
+from pathlib import Path
 
 from isaaclab_arena_gr00t.parallel_evaluation import (
     RTX_KIT_ARGS,
-    _build_parser,
     TASK_BASE_SEEDS,
+    _build_parser,
     _process_environment,
+    _python_package_versions,
     _worker_command,
     build_worker_overrides,
     split_episode_budget,
@@ -52,14 +55,12 @@ def test_randomized_start_pose_requires_explicit_opt_in():
 
 
 def test_repeated_task_options_select_multiple_tasks():
-    args = _build_parser().parse_args(
-        [
-            "--task",
-            "franka_blue_tray_1_cube",
-            "--task",
-            "franka_blue_tray_2_cubes",
-        ]
-    )
+    args = _build_parser().parse_args([
+        "--task",
+        "franka_blue_tray_1_cube",
+        "--task",
+        "franka_blue_tray_2_cubes",
+    ])
 
     assert args.task == ["franka_blue_tray_1_cube", "franka_blue_tray_2_cubes"]
 
@@ -97,6 +98,28 @@ def test_process_environment_uses_local_cosmos_model(tmp_path):
     assert environment["CUDA_VISIBLE_DEVICES"] == "0"
     assert environment["GROOT_COSMOS_MODEL_PATH"] == str(tmp_path / "cosmos")
     assert environment["PYTHONPATH"].split(":")[:2] == [str(tmp_path / "arena"), str(tmp_path / "gr00t")]
+
+
+def test_python_package_versions_prefers_container_version_files(tmp_path, monkeypatch):
+    isaac_sim_root = tmp_path / "isaac-sim"
+    isaac_lab_root = tmp_path / "isaaclab"
+    isaac_sim_root.mkdir()
+    isaac_lab_root.mkdir()
+    (isaac_sim_root / "VERSION").write_text("6.0.1-test\n", encoding="utf-8")
+    (isaac_lab_root / "VERSION").write_text("3.0.0-test\n", encoding="utf-8")
+    monkeypatch.setenv("ISAAC_PATH", str(isaac_sim_root))
+    monkeypatch.setenv("ISAAC_LAB_ROOT", str(isaac_lab_root))
+
+    versions = _python_package_versions(
+        Path(sys.executable),
+        ("isaacsim", "isaaclab", "definitely-not-an-installed-package"),
+    )
+
+    assert versions == {
+        "isaacsim": "6.0.1-test",
+        "isaaclab": "3.0.0-test",
+        "definitely-not-an-installed-package": "not-installed",
+    }
 
 
 def test_summarize_results_groups_worker_outputs_by_task(tmp_path):

@@ -213,10 +213,29 @@ def _assert_gpus_available(gpu_ids: list[int]) -> None:
 
 
 def _python_package_versions(python: Path, distributions: tuple[str, ...]) -> dict[str, str]:
-    script = (
-        "import importlib.metadata as m, json, sys; "
-        "print(json.dumps({name: m.version(name) for name in sys.argv[1:]}))"
-    )
+    script = """
+import importlib.metadata as metadata
+import json
+import os
+import sys
+from pathlib import Path
+
+version_files = {
+    "isaacsim": Path(os.environ.get("ISAAC_PATH", "/isaac-sim")) / "VERSION",
+    "isaaclab": Path(os.environ.get("ISAAC_LAB_ROOT", "/workspace/isaaclab")) / "VERSION",
+}
+versions = {}
+for name in sys.argv[1:]:
+    version_file = version_files.get(name)
+    if version_file is not None and version_file.is_file():
+        versions[name] = version_file.read_text(encoding="utf-8").strip()
+        continue
+    try:
+        versions[name] = metadata.version(name)
+    except metadata.PackageNotFoundError:
+        versions[name] = "not-installed"
+print(json.dumps(versions))
+"""
     result = subprocess.run(
         [str(python), "-c", script, *distributions],
         check=True,
